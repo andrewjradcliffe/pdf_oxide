@@ -2,7 +2,7 @@
 //! Tests the new character-level text extraction API with real PDFs
 
 #[test]
-fn test_extract_chars_basic() {
+fn test_extract_chars_character_properties() {
     use pdf_oxide::document::PdfDocument;
 
     // Try to open a test fixture or skip
@@ -57,7 +57,7 @@ fn test_extract_chars_basic() {
 }
 
 #[test]
-fn test_extract_chars_returns_tuple_bbox() {
+fn test_extract_chars_bbox_format() {
     use pdf_oxide::document::PdfDocument;
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

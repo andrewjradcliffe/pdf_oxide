@@ -4,7 +4,7 @@
 //! Tests lenient mode which searches first 1024 bytes for %PDF- marker.
 
 #[test]
-fn test_pdf_with_fixture() {
+fn test_pdf_header_parsing_basic() {
     use pdf_oxide::document::PdfDocument;
     use std::path::Path;
 
@@ -38,7 +38,7 @@ fn test_pdf_with_fixture() {
 }
 
 #[test]
-fn test_pdf_parsing_robustness() {
+fn test_pdf_header_parsing_multiple_pages() {
     use pdf_oxide::document::PdfDocument;
     use std::path::Path;
 
