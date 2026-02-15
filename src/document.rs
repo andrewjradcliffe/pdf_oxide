@@ -344,6 +344,9 @@ impl PdfDocument {
         stream_obj: &Object,
         obj_ref: ObjectRef,
     ) -> Result<Vec<u8>> {
+        if matches!(stream_obj, Object::Null) {
+            return Ok(Vec::new());
+        }
         if let Some(handler) = &self.encryption_handler {
             // Create decryption closure for this specific object
             let decrypt_fn = |data: &[u8]| -> Result<Vec<u8>> {
@@ -2665,15 +2668,15 @@ impl PdfDocument {
                 let mut combined = Vec::new();
 
                 for content_item in contents_array.iter() {
+                    if matches!(content_item, Object::Null) {
+                        continue;
+                    }
                     if let Some(ref_val) = content_item.as_reference() {
                         let content_obj = self.load_object(ref_val)?;
-                        // Decode with encryption support, using the object reference
                         let decoded = self.decode_stream_with_encryption(&content_obj, ref_val)?;
                         combined.extend_from_slice(&decoded);
-                        combined.push(b'\n'); // Add separator between streams
+                        combined.push(b'\n');
                     } else {
-                        // Direct stream object (rare but possible in array)
-                        // For direct objects, use a dummy object reference (0, 0)
                         let decoded = content_item.decode_stream_data()?;
                         combined.extend_from_slice(&decoded);
                         combined.push(b'\n');
@@ -2691,15 +2694,15 @@ impl PdfDocument {
             let mut combined = Vec::new();
 
             for content_item in contents_array.iter() {
+                if matches!(content_item, Object::Null) {
+                    continue;
+                }
                 if let Some(ref_val) = content_item.as_reference() {
                     let content_obj = self.load_object(ref_val)?;
-                    // Decode with encryption support, using the object reference
                     let decoded = self.decode_stream_with_encryption(&content_obj, ref_val)?;
                     combined.extend_from_slice(&decoded);
                     combined.push(b'\n');
                 } else {
-                    // Direct stream object (rare but possible)
-                    // For direct objects, use regular decoding (no encryption key)
                     let decoded = content_item.decode_stream_data()?;
                     combined.extend_from_slice(&decoded);
                     combined.push(b'\n');
