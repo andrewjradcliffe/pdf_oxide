@@ -131,3 +131,23 @@ fn test_header_with_letter_version() {
     let (major, minor, _offset) = parse_header(&mut cursor, true).unwrap();
     assert_eq!((major, minor), (1, 4)); // defaults to 1.4
 }
+
+#[test]
+fn test_authenticate_empty_password() {
+    use pdf_oxide::document::PdfDocument;
+    use std::path::Path;
+
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("simple.pdf");
+
+    if !fixture_path.exists() {
+        return;
+    }
+
+    let mut doc = PdfDocument::open(&fixture_path).unwrap();
+    // Non-encrypted PDF: authenticate always returns true
+    let result = doc.authenticate(b"").unwrap();
+    assert!(result, "Non-encrypted PDF should always authenticate");
+}

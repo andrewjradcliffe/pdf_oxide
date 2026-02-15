@@ -390,6 +390,27 @@ impl PdfDocument {
         Self::open(path)
     }
 
+    /// Authenticate with a password to decrypt encrypted PDFs.
+    ///
+    /// If the PDF is encrypted, `open()` automatically tries an empty password.
+    /// Call this method to authenticate with a non-empty password.
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - The password as bytes
+    ///
+    /// # Returns
+    ///
+    /// `Ok(true)` if authentication succeeded, `Ok(false)` if the password was wrong,
+    /// or `Ok(true)` if the PDF is not encrypted (no authentication needed).
+    pub fn authenticate(&mut self, password: &[u8]) -> Result<bool> {
+        self.ensure_encryption_initialized()?;
+        match &mut self.encryption_handler {
+            Some(handler) => handler.authenticate(password),
+            None => Ok(true), // Not encrypted, always "authenticated"
+        }
+    }
+
     /// Get the PDF version.
     ///
     /// Returns a tuple (major, minor) representing the PDF version.
