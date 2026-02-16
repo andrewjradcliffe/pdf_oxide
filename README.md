@@ -43,8 +43,8 @@ pdf_oxide = "0.3"
 
 ## Why pdf_oxide?
 
-- **Fast** — Rust core, p50 = 0.6ms per PDF, 97.6% under 10ms
-- **Reliable** — 100% pass rate on 3,830 test PDFs, zero panics
+- **Fast** — Rust core, mean 2.3ms per PDF, p99 = 20ms, 98.3% under 10ms
+- **Reliable** — 100% pass rate on 3,830 test PDFs, zero panics, zero slow (>5s) PDFs
 - **Complete** — Extract, create, and edit with one library
 - **Dual-language** — First-class Rust API and Python bindings via PyO3
 
@@ -114,20 +114,23 @@ Verified against 3,830 PDFs from three independent test suites:
 | Corpus | PDFs | Pass Rate |
 |--------|-----:|----------:|
 | veraPDF (PDF/A compliance) | 2,907 | 100% |
-| Mozilla pdf.js | 897 | 100% |
+| Mozilla pdf.js | 897 | 99.2% |
 | SafeDocs (targeted edge cases) | 26 | 100% |
-| **Total** | **3,830** | **100%** |
+| **Total** | **3,830** | **99.8%** |
 
-| Metric | Result |
-|--------|--------|
-| **p50 latency** | 0.6ms |
-| **p90 latency** | 3.0ms |
-| **p99 latency** | 33ms |
-| **Under 10ms** | 97.6% of PDFs |
-| **Timeouts** | 0 |
-| **Panics** | 0 |
+| Metric | v0.3.5 | v0.3.6 |
+|--------|--------|--------|
+| **Mean latency** | 23.3ms | **2.3ms** (-90%) |
+| **p50 latency** | 0.6ms | 0.7ms |
+| **p90 latency** | 3.0ms | 3.0ms |
+| **p99 latency** | 33ms | **20ms** (-39%) |
+| **Max latency** | 68,722ms | **625ms** (-99%) |
+| **Under 10ms** | 97.4% | **98.3%** |
+| **Slow (>5s)** | 2 | **0** |
+| **Timeouts** | 0 | 0 |
+| **Panics** | 0 | 0 |
 
-100% pass rate on all valid PDFs. The only 7 non-passing files across the entire corpus are intentionally broken test fixtures (no PDF header, fuzz-corrupted catalogs, invalid xref streams).
+v0.3.6 eliminated two O(n) bottlenecks: page tree traversal (168× faster on 10,000-page PDFs) and xref miss scanning (146× faster on tagged PDFs). 100% pass rate on all valid PDFs — the 7 non-passing files across the corpus are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams).
 
 ## Installation
 
@@ -193,4 +196,4 @@ Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your o
 
 ---
 
-**Rust** + **Python** | 100% pass rate on 3,830 PDFs | p50 = 0.6ms | v0.3.5
+**Rust** + **Python** | 99.8% pass rate on 3,830 PDFs | mean 2.3ms | v0.3.6

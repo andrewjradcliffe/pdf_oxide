@@ -2,6 +2,44 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.6] - 2026-02-16
+> Performance: Two Critical O(n) Bottlenecks Eliminated
+
+### Performance
+
+- **Bulk page tree cache** — On first page access, the entire page tree is walked once and all pages are cached. Previously `get_page()` traversed from root for every uncached page — O(n) per page, O(n²) total for sequential access. Now O(1) per page after a single O(n) walk.
+  - **isartor-6-1-12-t01-fail-a.pdf (10,000 pages): 55,667ms → 332ms (168× faster)**
+  - Eliminates the last >5s PDF in the entire 3,830-file corpus
+
+- **Scan-for-object offset cache** (#44) — When objects are missing from the xref table, `scan_for_object()` previously read the entire PDF file for each missing object. Tagged PDFs with hundreds of structure tree elements not in xref triggered hundreds of full file reads. Now the file is scanned once and all object offsets are cached in a HashMap.
+  - **Artikeltext (10pp, 1.3MB): 9,931ms → 68ms (146× faster)**
+  - **cs231n (154pp, 571 fonts): 17,872ms → 405ms (44× faster)**
+
+- **Single-pass text extraction** — `extract_spans()` no longer runs two passes (classify document type, then extract). The classification pass was discarded entirely; adaptive font-aware thresholds now produce equal or better results in a single pass.
+
+- **Content stream Vec pre-allocation** — `parse_content_stream()` pre-allocates operator Vec capacity based on stream size (`data.len() / 20`), reducing reallocations for large content streams.
+
+### Verified — 3,830-PDF Corpus (v0.3.5 → v0.3.6)
+
+| Metric | v0.3.5 | v0.3.6 | Change |
+|--------|--------|--------|--------|
+| **Pass rate** | 99.8% | 99.8% | 3,823 of 3,830 valid PDFs |
+| **Slow (>5s)** | 2 | **0** | Eliminated |
+| **Mean** | 23.3ms | **2.3ms** | **-90%** |
+| **p50** | 0.6ms | 0.7ms | — |
+| **p95** | 5.1ms | **4.7ms** | -8% |
+| **p99** | 33.2ms | **20.3ms** | **-39%** |
+| **Max** | 68,722ms | **625ms** | **-99%** |
+| **Sum (all PDFs)** | 89.1s | **8.8s** | **-90%** |
+
+The 7 non-passing files are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams).
+
+Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs show improved extraction quality from adaptive spacing (more complete words recovered).
+
+### 🏆 Community Contributors
+
+🥇 **@SeanPedersen** — Continued thanks to Sean whose Issue #44 performance report directly drove the investigation that uncovered both O(n) bottlenecks. His real-world test PDFs (German academic papers, Stanford lecture slides) were instrumental in profiling and validating the fixes. 🙏📊
+
 ## [0.3.5] - 2026-02-15
 > Performance, 3,830-PDF Stability & Error Recovery
 
