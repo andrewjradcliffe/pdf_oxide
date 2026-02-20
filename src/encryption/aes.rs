@@ -57,6 +57,61 @@ pub fn aes128_encrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, &'s
     Ok(padded)
 }
 
+/// Encrypt data using AES-128 in CBC mode WITHOUT padding.
+///
+/// Used by Algorithm 2.B (R=6) which handles its own data alignment.
+/// Data length must be a multiple of 16.
+pub fn aes128_encrypt_no_padding(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if key.len() != 16 {
+        return Err("AES-128 key must be 16 bytes");
+    }
+    if iv.len() != 16 {
+        return Err("IV must be 16 bytes");
+    }
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if data.len() % 16 != 0 {
+        return Err("Data length must be multiple of 16 for no-padding mode");
+    }
+
+    let mut buffer = data.to_vec();
+    let len = buffer.len();
+    let cipher = Aes128CbcEnc::new(key.into(), iv.into());
+    cipher
+        .encrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buffer, len)
+        .map_err(|_| "Encryption failed")?;
+
+    Ok(buffer)
+}
+
+/// Decrypt data using AES-256 in CBC mode WITHOUT padding.
+///
+/// Used for R=6 file encryption key unwrapping (UE/OE decryption).
+/// Data length must be a multiple of 16.
+pub fn aes256_decrypt_no_padding(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if key.len() != 32 {
+        return Err("AES-256 key must be 32 bytes");
+    }
+    if iv.len() != 16 {
+        return Err("IV must be 16 bytes");
+    }
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if data.len() % 16 != 0 {
+        return Err("Data length must be multiple of 16 for no-padding mode");
+    }
+
+    let mut buffer = data.to_vec();
+    let cipher = Aes256CbcDec::new(key.into(), iv.into());
+    cipher
+        .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buffer)
+        .map_err(|_| "Decryption failed")?;
+
+    Ok(buffer)
+}
+
 /// Decrypt data using AES-128 in CBC mode and remove PKCS#7 padding.
 ///
 /// # Arguments

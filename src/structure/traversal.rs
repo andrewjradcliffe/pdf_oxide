@@ -32,6 +32,11 @@ pub struct OrderedContent {
     /// text assembly. This supports CJK text that uses WB elements
     /// to mark word boundaries.
     pub is_word_break: bool,
+
+    /// Actual text replacement from /ActualText (optional)
+    /// Per PDF spec Section 14.9.4, when present this replaces all
+    /// descendant content with the specified text.
+    pub actual_text: Option<String>,
 }
 
 /// Traverse the structure tree and extract ordered content for a specific page.
@@ -76,6 +81,23 @@ fn traverse_element(
     let is_block = elem.struct_type.is_block();
     let is_word_break = elem.struct_type.is_word_break();
 
+    // If /ActualText is present, it replaces all descendant content (PDF spec 14.9.4)
+    if let Some(ref actual_text) = elem.actual_text {
+        if has_content_on_page(elem, target_page) {
+            result.push(OrderedContent {
+                page: target_page,
+                mcid: None,
+                struct_type: struct_type_str,
+                parsed_type,
+                is_heading,
+                is_block,
+                is_word_break: false,
+                actual_text: Some(actual_text.clone()),
+            });
+            return Ok(());
+        }
+    }
+
     // If this is a WB (word break) element, emit a word break marker
     if is_word_break {
         result.push(OrderedContent {
@@ -86,6 +108,7 @@ fn traverse_element(
             is_heading: false,
             is_block: false,
             is_word_break: true,
+            actual_text: None,
         });
         // WB elements typically have no children, but process any just in case
     }
@@ -104,6 +127,7 @@ fn traverse_element(
                         is_heading,
                         is_block,
                         is_word_break: false,
+                        actual_text: None,
                     });
                 }
             },
@@ -122,6 +146,29 @@ fn traverse_element(
     }
 
     Ok(())
+}
+
+/// Check if a structure element has any content on the target page.
+fn has_content_on_page(elem: &StructElem, target_page: u32) -> bool {
+    if elem.page == Some(target_page) {
+        return true;
+    }
+    for child in &elem.children {
+        match child {
+            StructChild::MarkedContentRef { page, .. } => {
+                if *page == target_page {
+                    return true;
+                }
+            }
+            StructChild::StructElem(child_elem) => {
+                if has_content_on_page(child_elem, target_page) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Extract all marked content IDs in reading order for a page.

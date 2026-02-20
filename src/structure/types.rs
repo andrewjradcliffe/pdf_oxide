@@ -80,6 +80,11 @@ pub struct StructElem {
     /// Per PDF spec Section 14.9.5, the /E entry provides the expanded form
     /// of an abbreviation or acronym (e.g., "PDF" -> "Portable Document Format")
     pub expansion: Option<String>,
+
+    /// Actual text replacement (optional)
+    /// Per PDF spec Section 14.9.4, /ActualText provides exact replacement text
+    /// for structure elements, overriding all descendant content.
+    pub actual_text: Option<String>,
 }
 
 impl StructElem {
@@ -92,6 +97,7 @@ impl StructElem {
             attributes: HashMap::new(),
             alt_text: None,
             expansion: None,
+            actual_text: None,
         }
     }
 

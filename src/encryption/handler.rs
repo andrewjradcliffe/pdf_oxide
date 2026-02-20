@@ -79,6 +79,7 @@ impl EncryptionHandler {
             self.dict.revision,
             self.dict.key_length_bytes(),
             self.dict.encrypt_metadata,
+            self.dict.user_encryption.as_deref(),
         ) {
             self.encryption_key = Some(key);
             log::info!("Successfully authenticated with user password");
@@ -95,6 +96,7 @@ impl EncryptionHandler {
             self.dict.revision,
             self.dict.key_length_bytes(),
             self.dict.encrypt_metadata,
+            self.dict.owner_encryption.as_deref(),
         ) {
             self.encryption_key = Some(key);
             log::info!("Successfully authenticated with owner password");
@@ -151,21 +153,36 @@ impl EncryptionHandler {
         match self.algorithm {
             Algorithm::None => Ok(data.to_vec()),
             Algorithm::RC4_40 | Algorithm::Rc4_128 => Ok(super::rc4::rc4_crypt(&obj_key, data)),
-            Algorithm::Aes128 | Algorithm::Aes256 => {
+            Algorithm::Aes128 => {
                 if obj_key.len() < 16 {
                     return Err(Error::InvalidPdf(format!(
-                        "AES object key too short: {} bytes (need 16)",
+                        "AES-128 object key too short: {} bytes (need 16)",
                         obj_key.len()
                     )));
                 }
-                // AES: first 16 bytes are IV, rest is ciphertext
                 if data.len() < 16 {
                     return Err(Error::InvalidPdf("AES encrypted data too short".to_string()));
                 }
                 let (iv, ciphertext) = data.split_at(16);
                 super::aes::aes128_decrypt(&obj_key[..16], iv, ciphertext)
-                    .map_err(|e| Error::InvalidPdf(format!("AES decryption failed: {}", e)))
-            },
+                    .map_err(|e| Error::InvalidPdf(format!("AES-128 decryption failed: {}", e)))
+            }
+            Algorithm::Aes256 => {
+                // AES-256 uses the file encryption key directly (no per-object key derivation)
+                // per ISO 32000-2:2020 Section 7.6.3.3
+                if key.len() < 32 {
+                    return Err(Error::InvalidPdf(format!(
+                        "AES-256 file key too short: {} bytes (need 32)",
+                        key.len()
+                    )));
+                }
+                if data.len() < 16 {
+                    return Err(Error::InvalidPdf("AES encrypted data too short".to_string()));
+                }
+                let (iv, ciphertext) = data.split_at(16);
+                super::aes::aes256_decrypt(&key[..32], iv, ciphertext)
+                    .map_err(|e| Error::InvalidPdf(format!("AES-256 decryption failed: {}", e)))
+            }
         }
     }
 
@@ -252,17 +269,49 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_stream_aes_with_short_key() {
+    fn test_decrypt_stream_aes128_with_short_key() {
         // RC4-40 produces a 10-byte key; AES needs 16. Should error, not panic.
         let mut handler = create_test_handler(Algorithm::Aes128);
-        // Simulate a short key (10 bytes, as from RC4-40)
         handler.encryption_key = Some(vec![0x01; 5]);
-        // Provide valid-length data (16-byte IV + some ciphertext)
         let data = vec![0u8; 32];
         let result = handler.decrypt_stream(&data, 1, 0);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("AES object key too short"), "got: {}", err_msg);
+        assert!(err_msg.contains("AES-128 object key too short"), "got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_decrypt_stream_aes256_with_short_key() {
+        let mut handler = create_test_handler(Algorithm::Aes256);
+        handler.encryption_key = Some(vec![0x01; 16]); // 16 bytes, need 32
+        let data = vec![0u8; 32];
+        let result = handler.decrypt_stream(&data, 1, 0);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("AES-256 file key too short"), "got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_decrypt_stream_aes256_uses_key_directly() {
+        // Verify AES-256 uses the file encryption key directly, not per-object key
+        use crate::encryption::aes;
+
+        let mut handler = create_test_handler(Algorithm::Aes256);
+        let file_key = vec![0x42u8; 32];
+        handler.encryption_key = Some(file_key.clone());
+
+        // Create test data: encrypt with the file key directly
+        let iv = [0u8; 16];
+        let plaintext = b"Hello, AES-256!!"; // 16 bytes
+        let encrypted = aes::aes256_encrypt(&file_key, &iv, plaintext).unwrap();
+
+        // Prepend IV to ciphertext (as PDF spec requires)
+        let mut data = iv.to_vec();
+        data.extend_from_slice(&encrypted);
+
+        // Decrypt through the handler — should use file key directly
+        let result = handler.decrypt_stream(&data, 1, 0).unwrap();
+        assert_eq!(&result, plaintext);
     }
 
     fn create_test_handler(algorithm: Algorithm) -> EncryptionHandler {

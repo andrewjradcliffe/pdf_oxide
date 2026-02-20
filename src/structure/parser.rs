@@ -10,6 +10,31 @@ use crate::error::Error;
 use crate::object::Object;
 use std::collections::HashMap;
 
+/// Decode a PDF text string (UTF-16BE/LE with BOM, or PDFDocEncoding).
+fn decode_pdf_text_string(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        // UTF-16BE with BOM
+        let utf16_pairs: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&utf16_pairs).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
+    } else if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        // UTF-16LE with BOM
+        let utf16_pairs: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&utf16_pairs).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
+    } else {
+        // PDFDocEncoding
+        bytes
+            .iter()
+            .filter_map(|&b| crate::fonts::font_dict::pdfdoc_encoding_lookup(b))
+            .collect()
+    }
+}
+
 /// Helper function to resolve an object (handles both direct objects and references).
 fn resolve_object(document: &mut PdfDocument, obj: &Object) -> Result<Object, Error> {
     match obj {
@@ -189,6 +214,18 @@ fn parse_struct_elem(
         let alt_obj = resolve_object(document, alt_obj)?;
         if let Some(alt_bytes) = alt_obj.as_string() {
             struct_elem.alt_text = Some(String::from_utf8_lossy(alt_bytes).to_string());
+        }
+    }
+
+    // Get /ActualText (replacement text) - optional, per PDF spec Section 14.9.4
+    // When present, this text replaces all descendant content for the element.
+    if let Some(at_obj) = dict.get("ActualText") {
+        let at_obj = resolve_object(document, at_obj)?;
+        if let Some(at_bytes) = at_obj.as_string() {
+            let text = decode_pdf_text_string(at_bytes);
+            if !text.is_empty() {
+                struct_elem.actual_text = Some(text);
+            }
         }
     }
 

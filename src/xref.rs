@@ -240,7 +240,7 @@ fn parse_xref_recursive<R: Read + Seek>(
     reader.seek(SeekFrom::Start(offset))?;
 
     // Peek at the first few bytes to determine xref type
-    let mut peek_buf = [0u8; 20]; // Increased to handle leading whitespace
+    let mut peek_buf = [0u8; 64]; // Handle leading whitespace in linearized PDFs
     let bytes_read = reader.read(&mut peek_buf)?;
     reader.seek(SeekFrom::Start(offset))?; // Reset position
 

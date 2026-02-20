@@ -17,6 +17,7 @@ use crate::parser_config::ParserOptions;
 
 mod ascii85;
 mod ascii_hex;
+mod brotli;
 mod ccitt;
 mod dct;
 mod flate;
@@ -27,6 +28,7 @@ mod runlength;
 
 pub use ascii85::Ascii85Decoder;
 pub use ascii_hex::AsciiHexDecoder;
+pub use brotli::BrotliDecoder;
 pub use ccitt::CcittFaxDecoder;
 pub use dct::DctDecoder;
 pub use flate::FlateDecoder;
@@ -65,6 +67,8 @@ pub enum Filter {
     CCITTFaxDecode,
     /// JBIG2Decode (JBIG2 compression)
     JBIG2Decode,
+    /// BrotliDecode (Brotli compression, PDF 2.0)
+    BrotliDecode,
 }
 
 /// Trait for PDF stream decoders.
@@ -101,6 +105,7 @@ fn normalize_filter_name(name: &str) -> Result<&'static str> {
         "DCTDecode" => return Ok("DCTDecode"),
         "CCITTFaxDecode" => return Ok("CCITTFaxDecode"),
         "JBIG2Decode" => return Ok("JBIG2Decode"),
+        "BrotliDecode" => return Ok("BrotliDecode"),
         _ => {},
     }
 
@@ -127,6 +132,7 @@ fn normalize_filter_name(name: &str) -> Result<&'static str> {
         "dctdecode" => Ok("DCTDecode"),
         "ccittfaxdecode" => Ok("CCITTFaxDecode"),
         "jbig2decode" => Ok("JBIG2Decode"),
+        "brotlidecode" => Ok("BrotliDecode"),
         _ => Err(Error::UnsupportedFilter(name.to_string())),
     }
 }
@@ -142,6 +148,7 @@ fn create_decoder(filter_name: &str) -> Result<Box<dyn StreamDecoder>> {
         "DCTDecode" => Box::new(DctDecoder),
         "CCITTFaxDecode" => Box::new(CcittFaxDecoder),
         "JBIG2Decode" => Box::new(Jbig2Decoder),
+        "BrotliDecode" => Box::new(BrotliDecoder),
         // normalize_filter_name already returns Err for unknown filters
         _ => unreachable!(),
     })

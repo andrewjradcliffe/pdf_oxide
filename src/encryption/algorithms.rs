@@ -7,7 +7,7 @@
 //! PDF 2.0 Spec (ISO 32000-2:2020): Section 7.6.4.3.3 - Algorithm 8-11 for R>=5
 
 use md5::{Digest, Md5};
-use sha2::Sha256;
+use sha2::{Sha256, Sha384, Sha512};
 
 /// Padding string used in PDF encryption (32 bytes).
 ///
@@ -151,10 +151,11 @@ pub fn authenticate_user_password(
     revision: u32,
     key_length: usize,
     encrypt_metadata: bool,
+    user_encryption: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
-    // R>=5 uses SHA-256 based verification (Algorithm 11)
+    // R>=5 uses SHA-256 based verification (Algorithm 11 for R5, Algorithm 2.A for R6)
     if revision >= 5 {
-        return authenticate_user_password_r5(password, user_key);
+        return authenticate_user_password_r5_r6(password, user_key, revision, user_encryption);
     }
 
     // Compute encryption key from password
@@ -188,15 +189,16 @@ pub fn authenticate_user_password(
     }
 }
 
-/// Verify user password for R>=5 (PDF 2.0 Algorithm 11).
+/// Verify user password for R>=5 (PDF 2.0 Algorithm 11 for R5, Algorithm 2.A for R6).
 ///
-/// PDF 2.0 Spec (ISO 32000-2:2020): Algorithm 11 — Authenticating the user password
-///
-/// 1. SASLprep and truncate password to 127 UTF-8 bytes
-/// 2. SHA-256(password || user_validation_salt) where validation_salt = U[32..40]
-/// 3. Compare with U[0..32]
-/// 4. If match: file encryption key = SHA-256(password || user_key_salt) where key_salt = U[40..48]
-fn authenticate_user_password_r5(password: &[u8], user_key: &[u8]) -> Option<Vec<u8>> {
+/// R5: Simple SHA-256 hash comparison.
+/// R6: Uses Algorithm 2.B (iterative hash with SHA-256/384/512 and AES-CBC).
+fn authenticate_user_password_r5_r6(
+    password: &[u8],
+    user_key: &[u8],
+    revision: u32,
+    user_encryption: Option<&[u8]>,
+) -> Option<Vec<u8>> {
     if user_key.len() < 48 {
         return None;
     }
@@ -207,20 +209,37 @@ fn authenticate_user_password_r5(password: &[u8], user_key: &[u8]) -> Option<Vec
     let validation_salt = &user_key[32..40];
     let key_salt = &user_key[40..48];
 
-    // Step 1: Verify — SHA-256(password || validation_salt)
-    let mut hasher = Sha256::new();
-    hasher.update(&password);
-    hasher.update(validation_salt);
-    let hash = hasher.finalize();
+    // Compute verification hash
+    let hash = if revision >= 6 {
+        // R6: Algorithm 2.B (ISO 32000-2:2020 S7.6.4.3.4)
+        algorithm_2b(&password, validation_salt, &[])
+    } else {
+        // R5: Simple SHA-256(password || validation_salt)
+        let mut hasher = Sha256::new();
+        hasher.update(&password);
+        hasher.update(validation_salt);
+        hasher.finalize().to_vec()
+    };
 
-    if constant_time_compare(&hash, &user_key[..32]) {
-        // Step 2: Derive file encryption key — SHA-256(password || key_salt)
+    if !constant_time_compare(&hash[..32], &user_key[..32]) {
+        return None;
+    }
+
+    if revision >= 6 {
+        // R6: Derive intermediate key via Algorithm 2.B, then unwrap UE
+        let ue = user_encryption?;
+        if ue.len() < 32 {
+            return None;
+        }
+        let intermediate_key = algorithm_2b(&password, key_salt, &[]);
+        let iv = [0u8; 16];
+        super::aes::aes256_decrypt_no_padding(&intermediate_key[..32], &iv, &ue[..32]).ok()
+    } else {
+        // R5: Simple SHA-256(password || key_salt)
         let mut hasher = Sha256::new();
         hasher.update(&password);
         hasher.update(key_salt);
         Some(hasher.finalize().to_vec())
-    } else {
-        None
     }
 }
 
@@ -236,6 +255,88 @@ fn saslprep_password(password: &[u8]) -> Vec<u8> {
         Ok(normalized) => normalized.as_bytes().to_vec(),
         Err(_) => password.to_vec(),
     }
+}
+
+/// ISO 32000-2:2020 Algorithm 2.B — Computing a hash (revision 6).
+///
+/// This iterative hash algorithm uses SHA-256, SHA-384, and SHA-512 combined
+/// with AES-128-CBC encryption. It replaces simple SHA-256 hashing used in R5.
+///
+/// # Arguments
+/// * `password` - The preprocessed password (SASLprep'd and truncated)
+/// * `salt` - 8-byte salt (validation_salt or key_salt)
+/// * `user_key` - Additional data: empty for user auth, U[0..48] for owner auth
+fn algorithm_2b(password: &[u8], salt: &[u8], user_key: &[u8]) -> Vec<u8> {
+    // Step 1: Initial hash = SHA-256(password || salt || user_key)
+    let mut hasher = Sha256::new();
+    hasher.update(password);
+    hasher.update(salt);
+    hasher.update(user_key);
+    let mut k = hasher.finalize().to_vec(); // 32 bytes
+
+    let mut round: usize = 0;
+    loop {
+        // Step a: Build K1 = (password || K || user_key) repeated 64 times
+        let k1_unit_len = password.len() + k.len() + user_key.len();
+        let mut k1 = Vec::with_capacity(k1_unit_len * 64);
+        for _ in 0..64 {
+            k1.extend_from_slice(password);
+            k1.extend_from_slice(&k);
+            k1.extend_from_slice(user_key);
+        }
+
+        // Pad K1 to multiple of 16 for AES-CBC
+        let remainder = k1.len() % 16;
+        if remainder != 0 {
+            k1.extend(std::iter::repeat_n(0u8, 16 - remainder));
+        }
+
+        // Step b: E = AES-128-CBC-encrypt(key=K[0..16], iv=K[16..32], data=K1)
+        let aes_key = &k[..16];
+        let aes_iv = &k[16..32];
+        let e = match super::aes::aes128_encrypt_no_padding(aes_key, aes_iv, &k1) {
+            Ok(encrypted) => encrypted,
+            Err(_) => return k, // Fallback on error
+        };
+
+        // Step c: Determine next hash algorithm.
+        // Sum of first 16 bytes of E, mod 3
+        let sum: u32 = e.iter().take(16).map(|&b| b as u32).sum();
+        let remainder = sum % 3;
+
+        // Step d: Hash E with selected algorithm
+        k = match remainder {
+            0 => {
+                let mut h = Sha256::new();
+                h.update(&e);
+                h.finalize().to_vec()
+            }
+            1 => {
+                let mut h = Sha384::new();
+                h.update(&e);
+                h.finalize().to_vec()
+            }
+            _ => {
+                let mut h = Sha512::new();
+                h.update(&e);
+                h.finalize().to_vec()
+            }
+        };
+
+        // Step e: Check termination condition
+        // Continue until round >= 63 AND last byte of E <= round - 32
+        if round >= 63 {
+            let last_byte = *e.last().unwrap_or(&0) as usize;
+            if last_byte <= round - 32 {
+                break;
+            }
+        }
+        round += 1;
+    }
+
+    // Return first 32 bytes
+    k.truncate(32);
+    k
 }
 
 /// Compute the user password hash for R=2 (Algorithm 4).
@@ -491,9 +592,10 @@ pub fn authenticate_owner_password(
     revision: u32,
     key_length: usize,
     encrypt_metadata: bool,
+    owner_encryption: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
     if revision >= 5 {
-        return authenticate_owner_password_r5(owner_password, owner_key, user_key);
+        return authenticate_owner_password_r5_r6(owner_password, owner_key, user_key, revision, owner_encryption);
     }
 
     // Algorithm 7: Authenticate owner password for R≤4
@@ -549,19 +651,20 @@ pub fn authenticate_owner_password(
         revision,
         key_length,
         encrypt_metadata,
+        None, // R<=4 path, no UE needed
     )
 }
 
-/// Verify owner password for R>=5 (PDF 2.0 Algorithm 12).
+/// Verify owner password for R>=5 (PDF 2.0 Algorithm 12 for R5, Algorithm 2.A for R6).
 ///
-/// 1. SASLprep + truncate password to 127 UTF-8 bytes
-/// 2. SHA-256(password || O[32..40] owner_validation_salt || U[0..48])
-/// 3. Compare hash with O[0..32]
-/// 4. If match: file encryption key = SHA-256(password || O[40..48] owner_key_salt || U[0..48])
-fn authenticate_owner_password_r5(
+/// R5: Simple SHA-256 hash comparison.
+/// R6: Uses Algorithm 2.B (iterative hash with SHA-256/384/512 and AES-CBC).
+fn authenticate_owner_password_r5_r6(
     password: &[u8],
     owner_key: &[u8],
     user_key: &[u8],
+    revision: u32,
+    owner_encryption: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
     if owner_key.len() < 48 || user_key.len() < 48 {
         return None;
@@ -574,22 +677,39 @@ fn authenticate_owner_password_r5(
     let owner_key_salt = &owner_key[40..48];
     let u_value = &user_key[..48];
 
-    // Step 1: Verify — SHA-256(password || owner_validation_salt || U[0..48])
-    let mut hasher = Sha256::new();
-    hasher.update(&password);
-    hasher.update(owner_validation_salt);
-    hasher.update(u_value);
-    let hash = hasher.finalize();
+    // Compute verification hash
+    let hash = if revision >= 6 {
+        // R6: Algorithm 2.B with U[0..48] as additional data
+        algorithm_2b(&password, owner_validation_salt, u_value)
+    } else {
+        // R5: SHA-256(password || owner_validation_salt || U[0..48])
+        let mut hasher = Sha256::new();
+        hasher.update(&password);
+        hasher.update(owner_validation_salt);
+        hasher.update(u_value);
+        hasher.finalize().to_vec()
+    };
 
-    if constant_time_compare(&hash, &owner_key[..32]) {
-        // Step 2: Derive file encryption key — SHA-256(password || owner_key_salt || U[0..48])
+    if !constant_time_compare(&hash[..32], &owner_key[..32]) {
+        return None;
+    }
+
+    if revision >= 6 {
+        // R6: Derive intermediate key via Algorithm 2.B, then unwrap OE
+        let oe = owner_encryption?;
+        if oe.len() < 32 {
+            return None;
+        }
+        let intermediate_key = algorithm_2b(&password, owner_key_salt, u_value);
+        let iv = [0u8; 16];
+        super::aes::aes256_decrypt_no_padding(&intermediate_key[..32], &iv, &oe[..32]).ok()
+    } else {
+        // R5: SHA-256(password || owner_key_salt || U[0..48])
         let mut hasher = Sha256::new();
         hasher.update(&password);
         hasher.update(owner_key_salt);
         hasher.update(u_value);
         Some(hasher.finalize().to_vec())
-    } else {
-        None
     }
 }
 
@@ -785,6 +905,7 @@ mod tests {
             revision,
             key_length,
             true,
+            None,
         );
 
         assert!(auth_result.is_some());
@@ -822,6 +943,7 @@ mod tests {
             revision,
             key_length,
             true,
+            None,
         );
 
         assert!(auth_result.is_some());
@@ -842,6 +964,7 @@ mod tests {
             2,
             5,
             true,
+            None,
         );
         assert!(result.is_none());
     }
@@ -883,7 +1006,7 @@ mod tests {
 
         let result = authenticate_user_password(
             password, &user_key, &[0u8; 48], // owner_key unused for R>=5
-            -1, b"", 5, 32, true,
+            -1, b"", 5, 32, true, None,
         );
         assert!(result.is_some());
 
@@ -911,7 +1034,7 @@ mod tests {
         user_key.extend_from_slice(&key_salt);
 
         let result =
-            authenticate_user_password(b"wrong", &user_key, &[0u8; 48], -1, b"", 5, 32, true);
+            authenticate_user_password(b"wrong", &user_key, &[0u8; 48], -1, b"", 5, 32, true, None);
         assert!(result.is_none());
     }
 
@@ -920,7 +1043,7 @@ mod tests {
         // U value shorter than 48 bytes should return None
         let result = authenticate_user_password(
             b"test", &[0u8; 40], // too short
-            &[0u8; 48], -1, b"", 5, 32, true,
+            &[0u8; 48], -1, b"", 5, 32, true, None,
         );
         assert!(result.is_none());
     }
@@ -957,6 +1080,7 @@ mod tests {
             revision,
             key_length,
             true,
+            None,
         );
         assert!(result.is_some());
         assert_eq!(result.unwrap(), encryption_key);
@@ -992,6 +1116,7 @@ mod tests {
             revision,
             key_length,
             true,
+            None,
         );
         assert!(result.is_some());
         assert_eq!(result.unwrap(), encryption_key);
@@ -1027,6 +1152,7 @@ mod tests {
             revision,
             key_length,
             true,
+            None,
         );
         assert!(result.is_none());
     }
@@ -1053,7 +1179,7 @@ mod tests {
         owner_key.extend_from_slice(&owner_key_salt);
 
         let result =
-            authenticate_owner_password(password, &user_key, &owner_key, -1, b"", 5, 32, true);
+            authenticate_owner_password(password, &user_key, &owner_key, -1, b"", 5, 32, true, None);
         assert!(result.is_some());
 
         // Verify the returned key is SHA-256(password || owner_key_salt || U[0..48])
@@ -1083,7 +1209,7 @@ mod tests {
         owner_key.extend_from_slice(&owner_key_salt);
 
         let result =
-            authenticate_owner_password(b"wrong", &user_key, &owner_key, -1, b"", 5, 32, true);
+            authenticate_owner_password(b"wrong", &user_key, &owner_key, -1, b"", 5, 32, true, None);
         assert!(result.is_none());
     }
 }

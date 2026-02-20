@@ -188,26 +188,29 @@ fn find_trailer<R: Read + Seek>(
 ) -> Result<Object> {
     log::debug!("Searching for trailer dictionary...");
 
-    // Search for "trailer" keyword
-    if let Some(mat) = RE_TRAILER.find(contents) {
+    // Search for all "trailer" keywords and prefer the last valid one.
+    // Per ISO 32000-1:2008 Section 7.5.5, the most recent trailer (from the
+    // latest incremental update) takes precedence. Using the first trailer can
+    // miss /Encrypt entries added in later revisions.
+    let mut best_trailer: Option<Object> = None;
+    for mat in RE_TRAILER.find_iter(contents) {
         let trailer_start = mat.start();
         log::debug!("Found trailer keyword at offset {}", trailer_start);
 
-        // Skip "trailer" keyword and parse the dictionary
         let trailer_keyword_end = trailer_start + 7; // len("trailer")
-
-        // Parse the trailer dictionary
         let input = &contents[trailer_keyword_end..];
         match parse_object(input) {
             Ok((_, obj)) => {
-                log::info!("Successfully parsed trailer dictionary");
-                return Ok(obj);
+                best_trailer = Some(obj);
             },
             Err(e) => {
-                log::warn!("Failed to parse trailer dictionary: {}", e);
-                // Fall through to reconstruction
+                log::warn!("Failed to parse trailer dictionary at offset {}: {}", trailer_start, e);
             },
         }
+    }
+    if let Some(trailer) = best_trailer {
+        log::info!("Successfully parsed trailer dictionary (using last valid occurrence)");
+        return Ok(trailer);
     }
 
     // No trailer found or parsing failed - reconstruct minimal trailer

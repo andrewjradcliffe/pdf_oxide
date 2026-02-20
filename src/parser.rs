@@ -303,23 +303,32 @@ fn parse_stream_data<'a>(
     if let Some(length_obj) = dict.get("Length") {
         if let Some(length) = length_obj.as_integer() {
             let length = length as usize;
-            if input.len() < length {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Eof,
-                )));
+            if length <= input.len() {
+                // Read exactly 'length' bytes
+                let stream_data = input[..length].to_vec();
+                let remaining = &input[length..];
+
+                // Skip whitespace and expect 'endstream'
+                let ws_result: nom::IResult<&[u8], &[u8]> =
+                    nom::bytes::complete::take_while(|c: u8| c.is_ascii_whitespace())(remaining);
+                if let Ok((remaining, _)) = ws_result {
+                    if let Ok((remaining, _)) = token(remaining) {
+                        return Ok((remaining, stream_data));
+                    }
+                }
             }
 
-            // Read exactly 'length' bytes
-            let stream_data = input[..length].to_vec();
-            let remaining = &input[length..];
-
-            // Skip whitespace and expect 'endstream'
-            let (remaining, _) =
-                nom::bytes::complete::take_while(|c: u8| c.is_ascii_whitespace())(remaining)?;
-            let (remaining, _) = token(remaining)?; // Should be Token::StreamEnd
-
-            return Ok((remaining, stream_data));
+            // /Length was wrong — fall back to scanning for 'endstream'
+            log::warn!(
+                "Stream /Length {} is incorrect, falling back to endstream scan",
+                length
+            );
+            if let Some(pos) = find_endstream(input) {
+                let stream_data = input[..pos].to_vec();
+                let remaining = &input[pos..];
+                let (remaining, _) = token(remaining)?;
+                return Ok((remaining, stream_data));
+            }
         }
     }
 
@@ -527,35 +536,28 @@ pub fn decode_hex(hex_bytes: &[u8]) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
 
+    // Per PDF spec ISO 32000-1:2008 §7.3.4.3: non-hex characters are treated as 0
+    fn hex_val(b: u8) -> u8 {
+        match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => 0, // Non-hex chars treated as 0 per spec
+        }
+    }
+
     let mut result = Vec::with_capacity(hex_str.len() / 2 + 1);
 
     // Process pairs of hex digits
     for chunk in hex_str.chunks(2) {
         match chunk.len() {
             2 => {
-                // Full byte: two hex digits
-                let hex = std::str::from_utf8(chunk).map_err(|e| Error::ParseError {
-                    offset: 0,
-                    reason: format!("Invalid UTF-8 in hex string: {}", e),
-                })?;
-                let byte = u8::from_str_radix(hex, 16).map_err(|e| Error::ParseError {
-                    offset: 0,
-                    reason: format!("Invalid hex digit: {}", e),
-                })?;
+                let byte = (hex_val(chunk[0]) << 4) | hex_val(chunk[1]);
                 result.push(byte);
             },
             1 => {
                 // Odd number of hex digits - pad last digit with 0
-                let hex = std::str::from_utf8(chunk).map_err(|e| Error::ParseError {
-                    offset: 0,
-                    reason: format!("Invalid UTF-8 in hex string: {}", e),
-                })?;
-                let byte = u8::from_str_radix(&format!("{}0", hex), 16).map_err(|e| {
-                    Error::ParseError {
-                        offset: 0,
-                        reason: format!("Invalid hex digit: {}", e),
-                    }
-                })?;
+                let byte = hex_val(chunk[0]) << 4;
                 result.push(byte);
             },
             _ => {

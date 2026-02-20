@@ -162,6 +162,11 @@ fn parse_number(input: &[u8]) -> IResult<&[u8], Token<'_>> {
 
     // Must have either integer part or fractional part
     if int_part.is_none() && frac_part.is_none() {
+        if sign.is_some() {
+            // Bare sign (e.g., `-` or `+`) without digits — treat as integer 0.
+            // This occurs in malformed TJ arrays like `(v)-(e)` where `-` is a bare offset.
+            return Ok((input, Token::Integer(0)));
+        }
         return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)));
     }
 
@@ -292,7 +297,7 @@ fn parse_hex_string(input: &[u8]) -> IResult<&[u8], Token<'_>> {
     delimited(
         char('<'),
         map(
-            take_while(|c: u8| c.is_ascii_hexdigit() || c.is_ascii_whitespace()),
+            take_while(|c: u8| c != b'>'),
             Token::HexString,
         ),
         char('>'),
