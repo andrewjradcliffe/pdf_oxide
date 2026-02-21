@@ -8,7 +8,6 @@
 use pdf_oxide::document::PdfDocument;
 use std::env;
 use std::fs;
-use std::path::Path;
 use std::time::Instant;
 
 fn main() {
