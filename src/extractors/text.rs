@@ -1073,8 +1073,10 @@ fn should_insert_space(
 ///
 /// This prevents double-spacing when text already contains space characters.
 fn has_boundary_space(preceding: &str, following: &str) -> bool {
-    let has_trailing_space = preceding.chars().last().is_some_and(|c| c.is_whitespace());
-    let has_leading_space = following.chars().next().is_some_and(|c| c.is_whitespace());
+    // Use ends_with/starts_with patterns instead of .chars().last() to avoid
+    // O(n) iteration over the entire accumulated text
+    let has_trailing_space = preceding.ends_with(|c: char| c.is_whitespace());
+    let has_leading_space = following.starts_with(|c: char| c.is_whitespace());
 
     has_trailing_space || has_leading_space
 }
@@ -1102,11 +1104,13 @@ fn build_boundary_characters(
     let next_first_char = next_text.chars().next().unwrap_or(' ');
 
     // Estimate character widths from bbox and character count
-    let prev_char_count = prev_text.chars().count().max(1) as f32;
+    // Use byte length as fast O(1) approximation (accurate for ASCII, close for UTF-8)
+    // to avoid O(n) char counting on the accumulated merge text
+    let prev_char_count = prev_text.len().max(1) as f32;
     let prev_char_width = prev_bbox.width / prev_char_count;
     let prev_last_x = prev_bbox.x + prev_bbox.width - prev_char_width;
 
-    let next_char_count = next_text.chars().count().max(1) as f32;
+    let next_char_count = next_text.len().max(1) as f32;
     let next_char_width = next_bbox.width / next_char_count;
 
     // Build CharacterInfo for boundary analysis
@@ -1157,7 +1161,12 @@ fn build_boundary_characters(
 /// - "user@outlook" + "." + "com" (space before TLD)
 /// - "user@" + "domain.com" (space after @)
 fn is_email_context(preceding_text: &str, following_text: &str) -> bool {
-    let prev = preceding_text.trim_end();
+    // Only check the last ~64 bytes for email patterns to avoid O(n) scan
+    // of the entire accumulated text (which would cause O(n²) in merge loop)
+    let prev_start = preceding_text.len().saturating_sub(64);
+    // Find a valid UTF-8 char boundary
+    let prev_start = preceding_text.ceil_char_boundary(prev_start);
+    let prev = preceding_text[prev_start..].trim_end();
     let next = following_text.trim_start();
 
     // Pattern 1: @ followed by domain part
@@ -2414,35 +2423,24 @@ impl TextExtractor {
         self.flush_tj_span_buffer()?;
 
         // Sort spans by reading order (top-to-bottom, left-to-right)
-        // DEBUG: Log span count and offset_semantic values before sorting
-        let space_spans_before = self
-            .spans
-            .iter()
-            .filter(|s| s.text.chars().all(|c| c.is_whitespace()))
-            .count();
-        let offset_semantic_before = self.spans.iter().filter(|s| s.offset_semantic).count();
-        log::debug!(
-            "Before sort_spans_by_reading_order(): {} spans total, {} space-only, {} offset_semantic=true",
-            self.spans.len(),
-            space_spans_before,
-            offset_semantic_before
-        );
+        if log::log_enabled!(log::Level::Debug) {
+            let space_spans = self
+                .spans
+                .iter()
+                .filter(|s| s.text.chars().all(|c| c.is_whitespace()))
+                .count();
+            let offset_semantic = self.spans.iter().filter(|s| s.offset_semantic).count();
+            log::debug!(
+                "Before sort_spans_by_reading_order(): {} spans total, {} space-only, {} offset_semantic=true",
+                self.spans.len(),
+                space_spans,
+                offset_semantic
+            );
+        }
 
         self.sort_spans_by_reading_order();
 
-        // DEBUG: Log after sorting
-        let space_spans_after = self
-            .spans
-            .iter()
-            .filter(|s| s.text.chars().all(|c| c.is_whitespace()))
-            .count();
-        let offset_semantic_after = self.spans.iter().filter(|s| s.offset_semantic).count();
-        log::debug!(
-            "After sort_spans_by_reading_order(): {} spans total, {} space-only, {} offset_semantic=true",
-            self.spans.len(),
-            space_spans_after,
-            offset_semantic_after
-        );
+        log::debug!("After sort_spans_by_reading_order(): {} spans", self.spans.len());
 
         // Deduplicate overlapping spans
         self.deduplicate_overlapping_spans();
@@ -2458,7 +2456,7 @@ impl TextExtractor {
         // This will respect split_boundary_before flags set by split_fused_words()
         self.merge_adjacent_spans();
 
-        Ok(self.spans.clone())
+        Ok(std::mem::take(&mut self.spans))
     }
 
     /// Extract individual characters from a PDF content stream.
@@ -2738,7 +2736,10 @@ impl TextExtractor {
             return;
         }
 
-        let mut deduplicated = Vec::with_capacity(self.spans.len());
+        // Take ownership of spans to avoid cloning during iteration
+        let old_len = self.spans.len();
+        let spans = std::mem::take(&mut self.spans);
+        let mut deduplicated = Vec::with_capacity(old_len);
         let mut prev_y_rounded: Option<i32> = None;
         let mut prev_x: Option<f32> = None;
         let mut prev_text: Option<String> = None;
@@ -2748,7 +2749,7 @@ impl TextExtractor {
         let mut geometric_skips = 0;
         let mut content_skips = 0;
 
-        for span in self.spans.iter() {
+        for span in spans {
             let y_rounded = span.bbox.y.round() as i32;
             let x = span.bbox.x;
 
@@ -2756,7 +2757,7 @@ impl TextExtractor {
             let geometric_duplicate = if let (Some(prev_y), Some(prev_x_val), Some(ref prev_txt)) =
                 (prev_y_rounded, prev_x, &prev_text)
             {
-                y_rounded == prev_y && (x - prev_x_val).abs() < 2.0 && &span.text == prev_txt
+                y_rounded == prev_y && (x - prev_x_val).abs() < 2.0 && span.text == *prev_txt
             } else {
                 false
             };
@@ -2785,7 +2786,6 @@ impl TextExtractor {
             } else if content_duplicate {
                 content_skips += 1;
             } else {
-                deduplicated.push(span.clone());
                 prev_y_rounded = Some(y_rounded);
                 prev_x = Some(x);
                 prev_text = Some(span.text.clone());
@@ -2794,6 +2794,8 @@ impl TextExtractor {
                 if span.text.len() >= 5 {
                     seen_content.insert(span.text.clone(), (span.bbox.x, span.bbox.y));
                 }
+                // Move span instead of cloning
+                deduplicated.push(span);
             }
         }
 
@@ -2802,7 +2804,7 @@ impl TextExtractor {
             geometric_skips + content_skips,
             geometric_skips,
             content_skips,
-            self.spans.len(),
+            old_len,
             deduplicated.len()
         );
 
@@ -2823,13 +2825,16 @@ impl TextExtractor {
             return;
         }
 
-        let mut merged = Vec::with_capacity(self.spans.len());
+        // Take ownership of spans to avoid cloning during iteration
+        let old_len = self.spans.len();
+        let spans = std::mem::take(&mut self.spans);
+        let mut merged = Vec::with_capacity(old_len);
         let mut current_span: Option<TextSpan> = None;
 
-        for span in self.spans.iter() {
+        for span in spans {
             if current_span.is_none() {
-                // First span
-                current_span = Some(span.clone());
+                // First span — move, no clone needed
+                current_span = Some(span);
                 continue;
             }
 
@@ -2864,16 +2869,14 @@ impl TextExtractor {
                 || (same_line && has_split_boundary);
 
             if should_merge {
-                // Merge spans: concatenate text and extend bbox
-                let old_text = current.text.clone();
-
                 // PHASE 1 FIX: Check if next span is entirely whitespace-only OR marked as offset_semantic space
                 // If either is true, never insert an additional space - just concatenate directly
                 // This prevents double-space issue when TJ processor creates space spans
                 let next_is_whitespace_only = span.text.chars().all(|c| c.is_whitespace());
                 let next_is_offset_semantic_space = span.offset_semantic && next_is_whitespace_only;
 
-                let merged_text = if next_is_whitespace_only {
+                // Merge spans: append text in-place using push_str (O(n) total vs O(n²) with format!)
+                if next_is_whitespace_only {
                     // Next span is already space-only: just concatenate without adding more space
                     log::debug!(
                         "Merging with whitespace-only span: '{}' + '{}' (whitespace, offset_semantic={})",
@@ -2881,7 +2884,7 @@ impl TextExtractor {
                         span.text.escape_default(),
                         span.offset_semantic
                     );
-                    format!("{}{}", current.text, span.text)
+                    current.text.push_str(&span.text);
                 } else {
                     // Use unified space decision function with detected document type
                     // If we have a split_boundary_before flag, FORCE a space by treating it like a TJ offset
@@ -2920,7 +2923,7 @@ impl TextExtractor {
                             log::debug!(
                                 "Suppressing space insertion: next span is already TJ-offset space"
                             );
-                            format!("{}{}", current.text, span.text)
+                            current.text.push_str(&span.text);
                         } else {
                             // NEW: Prevent double-space edge case
                             // If current text ends with space AND next span starts with space, skip inserting space
@@ -2931,7 +2934,7 @@ impl TextExtractor {
                                 log::debug!(
                                     "Preventing double-space: current ends with space, next starts with space"
                                 );
-                                format!("{}{}", current.text, span.text)
+                                current.text.push_str(&span.text);
                             } else {
                                 match space_decision.source {
                                     SpaceSource::CharacterHeuristic => {
@@ -2954,7 +2957,8 @@ impl TextExtractor {
                                         log::trace!("Space via {:?}", space_decision.source);
                                     },
                                 }
-                                format!("{} {}", current.text, span.text)
+                                current.text.push(' ');
+                                current.text.push_str(&span.text);
                             }
                         }
                     } else {
@@ -2963,7 +2967,7 @@ impl TextExtractor {
                             "No space insertion: decision source={:?}",
                             space_decision.source
                         );
-                        format!("{}{}", current.text, span.text)
+                        current.text.push_str(&span.text);
                     }
                 };
 
@@ -2971,16 +2975,14 @@ impl TextExtractor {
                 let new_width = (span.bbox.x + span.bbox.width) - current.bbox.x;
                 let new_height = current.bbox.height.max(span.bbox.height);
 
-                current.text = merged_text;
                 current.bbox.width = new_width;
                 current.bbox.height = new_height;
 
                 log::trace!(
-                    "Merged spans: '{}' + '{}' -> '{}' (gap={:.1}pt)",
-                    old_text,
+                    "Merged span: appended '{}' (gap={:.1}pt, now {} chars)",
                     span.text,
-                    current.text,
-                    gap
+                    gap,
+                    current.text.len()
                 );
 
                 // Put modified current back
@@ -3004,7 +3006,7 @@ impl TextExtractor {
                     }
                 }
                 merged.push(current);
-                current_span = Some(span.clone());
+                current_span = Some(span);
             }
         }
 
@@ -3013,7 +3015,7 @@ impl TextExtractor {
             merged.push(last);
         }
 
-        log::debug!("Merged adjacent spans: {} -> {} spans", self.spans.len(), merged.len());
+        log::debug!("Merged adjacent spans: {} -> {} spans", old_len, merged.len());
 
         self.spans = merged;
     }
