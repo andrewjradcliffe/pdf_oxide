@@ -2471,6 +2471,10 @@ impl PdfDocument {
         // (Widget /V values, FreeText /Contents, Stamp appearance streams)
         self.append_annotation_text(page_index, &mut text);
 
+        // Filter leaked PDF metadata (e.g., CalRGB ColorSpace dictionaries)
+        // Some PDFs embed inline color space definitions that get parsed as text
+        let text = Self::filter_leaked_metadata(&text);
+
         // Apply whitespace cleanup for better readability
         // This normalizes excessive double spaces and blank lines
         let cleaned_text = crate::converters::whitespace::cleanup_plain_text(&text);
@@ -2579,6 +2583,57 @@ impl PdfDocument {
     /// * `prev` - Previous text span
     /// * `current` - Current text span
     ///
+    /// Filter leaked PDF internal metadata from extracted text.
+    ///
+    /// Some PDFs embed inline ColorSpace definitions (CalRGB, CalGray, Lab) that
+    /// get parsed as text content. This removes known metadata patterns like
+    /// "WhitePoint [ ... ]", "BlackPoint [ ... ]", "Gamma [ ... ]", "Matrix [ ... ]".
+    fn filter_leaked_metadata(text: &str) -> String {
+        // Known PDF metadata keys that should never appear in extracted text.
+        // These come from CalRGB/CalGray/Lab color space dictionaries.
+        const METADATA_PATTERNS: &[&str] = &[
+            "WhitePoint",
+            "BlackPoint",
+            "Gamma",
+            "Matrix",
+            "CalRGB",
+            "CalGray",
+        ];
+
+        // Quick check: if none of the patterns appear, return as-is
+        if !METADATA_PATTERNS.iter().any(|p| text.contains(p)) {
+            return text.to_string();
+        }
+
+        // Filter line-by-line: remove lines that look like PDF metadata
+        let mut result = String::with_capacity(text.len());
+        for line in text.lines() {
+            let trimmed = line.trim();
+            // Skip lines matching "MetadataKey [ ... ]" or "MetadataKey [ ... ] ..."
+            let is_metadata = METADATA_PATTERNS.iter().any(|pattern| {
+                if let Some(rest) = trimmed.strip_prefix(pattern) {
+                    // Must be followed by whitespace and bracket, or end of line
+                    let rest = rest.trim_start();
+                    rest.is_empty()
+                        || rest.starts_with('[')
+                        || rest.starts_with('/')
+                        || rest.starts_with('<')
+                } else {
+                    false
+                }
+            });
+
+            if !is_metadata {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(line);
+            }
+        }
+
+        result
+    }
+
     /// # Returns
     /// `true` if a space should be inserted between the spans
     fn should_insert_space(prev: &TextSpan, current: &TextSpan) -> bool {
