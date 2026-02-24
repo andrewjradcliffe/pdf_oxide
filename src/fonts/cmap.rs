@@ -520,11 +520,20 @@ fn parse_bfchar_line(line: &str) -> Vec<(u32, String)> {
                 if dst_hex.len() <= 4 {
                     let dst_code = u32::from_str_radix(&dst_hex, 16).ok()?;
                     char::from_u32(dst_code)?.to_string()
+                } else if dst_hex.len() <= 6 {
+                    // 5-6 hex digits: direct supplementary Unicode code point (e.g., 020BB7 = U+20BB7)
+                    let dst_code = u32::from_str_radix(&dst_hex, 16).ok()?;
+                    if let Some(ch) = char::from_u32(dst_code) {
+                        ch.to_string()
+                    } else {
+                        return None;
+                    }
                 } else if dst_hex.len() == 8 {
                     let dst_code = u32::from_str_radix(&dst_hex, 16).ok()?;
                     if let Some(decoded) = decode_utf16_surrogate_pair(dst_code) {
                         decoded
                     } else {
+                        // Not a surrogate pair — try as two BMP characters
                         let mut result = String::new();
                         if let Ok(code1) = u32::from_str_radix(&dst_hex[0..4], 16) {
                             if let Some(ch) = char::from_u32(code1) {
@@ -704,20 +713,29 @@ fn parse_bfrange_line(line: &str) -> Option<Vec<(u32, String)>> {
 
         let mut result = Vec::new();
         let range_size = end.saturating_sub(start).min(10000); // Safety limit
-        for i in 0..=range_size {
-            let src = start.wrapping_add(i);
-            let dst_code = dst_start.wrapping_add(i);
 
-            // Try to decode as UTF-16 surrogate pair first (for values > 0xFFFF)
-            let unicode_string = if dst_code > 0xFFFF {
-                decode_utf16_surrogate_pair(dst_code)
+        // For surrogate pair destinations (8 hex digits), decode to Unicode code point
+        // first, then increment the code point. Naively incrementing the raw u32 would
+        // overflow across the low surrogate boundary (0xDFFF → 0xE000).
+        let base_codepoint = if dst_start > 0xFFFF {
+            if let Some(decoded) = decode_utf16_surrogate_pair(dst_start) {
+                // It's a surrogate pair — use decoded code point as base
+                decoded.chars().next().map(|c| c as u32)
             } else {
-                // Normal Unicode code point
-                char::from_u32(dst_code).map(|ch| ch.to_string())
-            };
+                // Not a surrogate pair but > 0xFFFF — use as direct code point
+                Some(dst_start)
+            }
+        } else {
+            Some(dst_start)
+        };
 
-            if let Some(s) = unicode_string {
-                result.push((src, s));
+        if let Some(base_cp) = base_codepoint {
+            for i in 0..=range_size {
+                let src = start.wrapping_add(i);
+                let cp = base_cp.wrapping_add(i);
+                if let Some(ch) = char::from_u32(cp) {
+                    result.push((src, ch.to_string()));
+                }
             }
         }
         return Some(result);
@@ -757,7 +775,13 @@ fn parse_notdefrange_line(line: &str) -> Option<Vec<(u32, String)>> {
         } else {
             let dst_hex = dst_str.replace(char::is_whitespace, "");
             let dst_code = u32::from_str_radix(&dst_hex, 16).ok()?;
-            char::from_u32(dst_code)?.to_string()
+            if dst_code > 0xFFFF {
+                // Try surrogate pair decoding first, then direct code point
+                decode_utf16_surrogate_pair(dst_code)
+                    .or_else(|| char::from_u32(dst_code).map(|ch| ch.to_string()))?
+            } else {
+                char::from_u32(dst_code)?.to_string()
+            }
         };
 
         let mut result = Vec::new();
