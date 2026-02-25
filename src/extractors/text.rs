@@ -3353,16 +3353,8 @@ impl TextExtractor {
                                 Some(TjBuffer::new(self.state_stack.current(), self.current_mcid, &self.fonts));
                         }
 
-                        // Append to buffer
-                        if let Some(ref mut buffer) = self.tj_span_buffer {
-                            buffer.append(&text)?;
-                        }
-
-                        // Advance position (text matrix must be updated)
-                        let w = self.advance_position_for_string(&text)?;
-                        if let Some(ref mut buffer) = self.tj_span_buffer {
-                            buffer.accumulated_width += w;
-                        }
+                        // Merged single-pass: Unicode decode + width + position advance
+                        self.append_and_advance(&text)?;
                     } else {
                         self.show_text(&text)?;
                     }
@@ -3550,13 +3542,7 @@ impl TextExtractor {
                         self.tj_span_buffer =
                             Some(TjBuffer::new(self.state_stack.current(), self.current_mcid, &self.fonts));
                     }
-                    if let Some(ref mut buffer) = self.tj_span_buffer {
-                        buffer.append(&text)?;
-                    }
-                    let w = self.advance_position_for_string(&text)?;
-                    if let Some(ref mut buffer) = self.tj_span_buffer {
-                        buffer.accumulated_width += w;
-                    }
+                    self.append_and_advance(&text)?;
                 } else {
                     self.show_text(&text)?;
                 }
@@ -3585,13 +3571,7 @@ impl TextExtractor {
                         self.tj_span_buffer =
                             Some(TjBuffer::new(self.state_stack.current(), self.current_mcid, &self.fonts));
                     }
-                    if let Some(ref mut buffer) = self.tj_span_buffer {
-                        buffer.append(&text)?;
-                    }
-                    let w = self.advance_position_for_string(&text)?;
-                    if let Some(ref mut buffer) = self.tj_span_buffer {
-                        buffer.accumulated_width += w;
-                    }
+                    self.append_and_advance(&text)?;
                 } else {
                     self.show_text(&text)?;
                 }
@@ -5164,6 +5144,103 @@ impl TextExtractor {
         state.text_matrix.f += advance * text_matrix.b;
 
         Ok(total_width)
+    }
+
+    /// Combined Unicode decode + width calculation in a single pass.
+    /// Merges TjBuffer::append and advance_position_for_string for simple fonts,
+    /// eliminating one full per-byte iteration per Tj operator.
+    fn append_and_advance(&mut self, text: &[u8]) -> Result<()> {
+        let text = if text.len() > 32_767 { &text[..32_767] } else { text };
+
+        let state = self.state_stack.current();
+        let font_size = state.font_size;
+        let horizontal_scaling = state.horizontal_scaling;
+        let char_space = state.char_space;
+        let word_space = state.word_space;
+
+        let fs_factor = font_size / 1000.0;
+        let hs_factor = horizontal_scaling / 100.0;
+        let cs_hs = char_space * hs_factor;
+        let ws_hs = word_space * hs_factor;
+
+        // Disjoint field borrows: cached_current_font (immutable) + tj_span_buffer (mutable)
+        let font = self.cached_current_font.as_deref();
+        let buffer = self.tj_span_buffer.as_mut().unwrap();
+
+        let total_width = if let Some(font) = font {
+            if font.subtype != "Type0" {
+                // Fast path: single pass over bytes for both Unicode and width
+                let char_table = font.get_byte_to_char_table();
+                let width_table = font.get_byte_to_width_table();
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    // Unicode decode
+                    let c = char_table[byte as usize];
+                    if c != '\0' {
+                        buffer.unicode.push(c);
+                    } else {
+                        // Rare: multi-char mapping or unmapped byte
+                        if let Some(s) = font.char_to_unicode(byte as u32) {
+                            if s != "\u{FFFD}" {
+                                for ch in s.chars() {
+                                    if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                        buffer.unicode.push(ch);
+                                    }
+                                }
+                            }
+                        } else {
+                            let fb = fallback_char_to_unicode(byte as u16);
+                            if fb != "\u{FFFD}" {
+                                for ch in fb.chars() {
+                                    if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                        buffer.unicode.push(ch);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Width calculation
+                    let mut w = width_table[byte as usize] * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 { w += ws_hs; }
+                    w_sum += w;
+                }
+                w_sum
+            } else {
+                // Type0/CID font: use existing separate paths
+                buffer.append(text)?;
+                // Width calculation (cannot merge due to multi-byte decode)
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let mut w = font.get_glyph_width(byte as u16) * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 { w += ws_hs; }
+                    w_sum += w;
+                }
+                w_sum
+            }
+        } else {
+            // No font: decode as ASCII + use default widths
+            buffer.append(text)?;
+            let default_w = 500.0 * fs_factor * hs_factor + cs_hs;
+            let space_w = default_w + ws_hs;
+            let mut w_sum = 0.0f32;
+            for &byte in text {
+                w_sum += if byte == 0x20 { space_w } else { default_w };
+            }
+            w_sum
+        };
+
+        buffer.accumulated_width += total_width;
+
+        // Update text matrix position
+        let state = self.state_stack.current_mut();
+        let text_matrix = state.text_matrix;
+        let advance = total_width / text_matrix.d.abs();
+        state.text_matrix.e += advance * text_matrix.a;
+        state.text_matrix.f += advance * text_matrix.b;
+
+        Ok(())
     }
 
     /// Insert a space character as a separate span.
