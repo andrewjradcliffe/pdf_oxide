@@ -50,20 +50,17 @@ pdf_oxide = "0.3"
 
 ## Performance
 
-Benchmarked on 3,830 PDFs from three independent public test suites (veraPDF, Mozilla pdf.js, DARPA SafeDocs). 18 libraries tested, single-thread, 60s timeout, no warm-up.
+Benchmarked on 3,830 PDFs from three independent public test suites (veraPDF, Mozilla pdf.js, DARPA SafeDocs). Text extraction libraries only (no OCR). Single-thread, 60s timeout, no warm-up.
 
 ### Python Libraries
 
 | Library | Mean | p99 | Pass Rate | License |
 |---------|------|-----|-----------|---------|
 | **PDF Oxide** | **0.8ms** | **9ms** | **100%** | **MIT** |
-| unstructured | 478.4ms | 1,477ms | 99.6% | Apache-2.0 |
 | PyMuPDF | 4.6ms | 28ms | 99.3% | AGPL-3.0 |
 | pypdfium2 | 4.1ms | 42ms | 99.2% | Apache-2.0 |
-| kreuzberg | 7.2ms | 49ms | 99.1% | MIT |
 | pymupdf4llm | 55.5ms | 280ms | 99.1% | AGPL-3.0 |
 | pdftext | 7.3ms | 82ms | 99.0% | GPL-3.0 |
-| extractous | 112.0ms | 165ms | 98.9% | Apache-2.0 |
 | pdfminer | 16.8ms | 124ms | 98.8% | MIT |
 | pdfplumber | 23.2ms | 189ms | 98.8% | MIT |
 | markitdown | 108.8ms | 378ms | 98.6% | MIT |
@@ -81,7 +78,7 @@ Benchmarked on 3,830 PDFs from three independent public test suites (veraPDF, Mo
 
 ### Text Quality
 
-99.5% text parity vs PyMuPDF, pypdfium2, and kreuzberg across the full corpus. PDF Oxide extracts text from 7–10× more "hard" files than it misses vs any competitor.
+99.5% text parity vs PyMuPDF and pypdfium2 across the full corpus. PDF Oxide extracts text from 7–10× more "hard" files than it misses vs any competitor.
 
 ### Corpus
 

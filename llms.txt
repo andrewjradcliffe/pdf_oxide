@@ -24,11 +24,11 @@
 
 ## Performance (v0.3.9)
 
-Benchmarked on 3,830 PDFs (veraPDF, Mozilla pdf.js, DARPA SafeDocs). 18 libraries tested.
+Benchmarked on 3,830 PDFs (veraPDF, Mozilla pdf.js, DARPA SafeDocs). Text extraction libraries only (no OCR).
 
-Python: pdf_oxide 0.8ms, pypdfium2 4.1ms, PyMuPDF 4.6ms, kreuzberg 7.2ms, pdftext 7.3ms, pypdf 12.1ms, pdfminer 16.8ms, pdfplumber 23.2ms, pymupdf4llm 55.5ms, markitdown 108.8ms, extractous 112.0ms, unstructured 478.4ms.
+Python: pdf_oxide 0.8ms, pypdfium2 4.1ms, PyMuPDF 4.6ms, pdftext 7.3ms, pypdf 12.1ms, pdfminer 16.8ms, pdfplumber 23.2ms, pymupdf4llm 55.5ms, markitdown 108.8ms.
 Rust: pdf_oxide 0.8ms (100% pass), lopdf 0.3ms (80% pass, no text extraction), unpdf 2.8ms (95.1%), pdf_extract 4.08ms (91.5%), oxidize_pdf 13.5ms (99.1%).
-Text quality: 99.5% parity vs PyMuPDF/pypdfium2/kreuzberg.
+Text quality: 99.5% parity vs PyMuPDF/pypdfium2.
 
 ## Guides
 

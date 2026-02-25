@@ -23,7 +23,7 @@
 //!
 //! ## Performance (v0.3.9)
 //!
-//! Benchmarked against 18 libraries on 3,830 PDFs from 3 public test suites
+//! Benchmarked against 14 text extraction libraries on 3,830 PDFs from 3 public test suites
 //! (veraPDF, Mozilla pdf.js, DARPA SafeDocs). Single-thread, 60s timeout, no warm-up.
 //!
 //! ### Python PDF Libraries
@@ -31,13 +31,10 @@
 //! | Library | Mean | Pass Rate | License |
 //! |---------|------|-----------|---------|
 //! | **pdf_oxide** | **0.8ms** | **100%** | **MIT** |
-//! | unstructured | 478.4ms | 99.6% | Apache-2.0 |
 //! | PyMuPDF | 4.6ms | 99.3% | AGPL-3.0 |
 //! | pypdfium2 | 4.1ms | 99.2% | Apache-2.0 |
-//! | kreuzberg | 7.2ms | 99.1% | MIT |
 //! | pymupdf4llm | 55.5ms | 99.1% | AGPL-3.0 |
 //! | pdftext | 7.3ms | 99.0% | GPL-3.0 |
-//! | extractous | 112.0ms | 98.9% | Apache-2.0 |
 //! | pdfminer | 16.8ms | 98.8% | MIT |
 //! | pdfplumber | 23.2ms | 98.8% | MIT |
 //! | markitdown | 108.8ms | 98.6% | MIT |
@@ -53,7 +50,7 @@
 //! | pdf_extract | 4.08ms | 91.5% | Basic |
 //! | lopdf | 0.3ms | 80.2% | No built-in extraction |
 //!
-//! 99.5% text quality parity vs PyMuPDF, pypdfium2, and kreuzberg across the full corpus.
+//! 99.5% text quality parity vs PyMuPDF and pypdfium2 across the full corpus.
 //! Full benchmark details: <https://pdf.oxide.fyi/docs/performance>
 //!
 //! ## Core Features
