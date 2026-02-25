@@ -653,9 +653,17 @@ fn parse_bfrange_line(line: &str) -> Option<Vec<(u32, String)>> {
 
             // Parse destination - could be one Unicode code point, UTF-16 surrogate, or multiple (ligature)
             let dst = if dst_hex.len() <= 4 {
-                // Single Unicode code point
+                // Single Unicode code point (BMP)
                 let dst_code = u32::from_str_radix(dst_hex, 16).ok()?;
                 char::from_u32(dst_code)?.to_string()
+            } else if dst_hex.len() <= 6 {
+                // 5-6 hex digits: supplementary Unicode code point (e.g., 020BB7 = U+20BB7)
+                let dst_code = u32::from_str_radix(dst_hex, 16).ok()?;
+                if let Some(ch) = char::from_u32(dst_code) {
+                    ch.to_string()
+                } else {
+                    continue;
+                }
             } else if dst_hex.len() == 8 {
                 // 8 hex digits - try UTF-16 surrogate pair first
                 let dst_code = u32::from_str_radix(dst_hex, 16).ok()?;

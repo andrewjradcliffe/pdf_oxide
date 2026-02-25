@@ -1353,7 +1353,7 @@ impl TjBuffer {
                                 }
                             }
                         } else {
-                            let fb = fallback_char_to_unicode(byte as u16);
+                            let fb = fallback_char_to_unicode(byte as u32);
                             if fb != "\u{FFFD}" {
                                 for ch in fb.chars() {
                                     if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
@@ -1396,7 +1396,7 @@ impl TjBuffer {
 ///
 /// # Returns
 /// Best-effort Unicode string representation, or "?" if no mapping possible
-fn fallback_char_to_unicode(char_code: u16) -> String {
+fn fallback_char_to_unicode(char_code: u32) -> String {
     match char_code {
         // ==================================================================================
         // PRIORITY 1: Common Punctuation (most frequently failing)
@@ -1520,44 +1520,18 @@ fn fallback_char_to_unicode(char_code: u16) -> String {
         // ==================================================================================
         // PRIORITY 5: Direct Unicode (for valid ranges)
         // ==================================================================================
-        // Valid Unicode ranges: 0x0000-0xD7FF, 0xE000-0xFFFF (BMP)
-        // Excludes surrogate pairs (0xD800-0xDFFF) and above BMP (handled separately)
-        code if (code <= 0xD7FF || (0xE000..=0xF8FF).contains(&code)) => {
-            // Private Use Area (0xE000-0xF8FF): Return visual description
-            if (0xE000..=0xF8FF).contains(&code) {
-                // These are application-specific symbols (logos, custom glyphs, etc.)
-                // Can't decode to standard Unicode, so provide context
-                log::debug!("Private Use Area character: U+{:04X}", code);
-                // Return the character itself - it's valid Unicode but application-specific
-                if let Some(ch) = char::from_u32(code as u32) {
-                    return ch.to_string();
+        // Valid Unicode: BMP (0x0000-0xD7FF, 0xE000-0xFFFF) and supplementary planes
+        // Excludes surrogate pairs (0xD800-0xDFFF)
+        code => {
+            if let Some(ch) = char::from_u32(code) {
+                if (0xE000..=0xF8FF).contains(&code) {
+                    log::debug!("Private Use Area character: U+{:04X}", code);
                 }
-            }
-
-            // Standard Unicode in valid range
-            if let Some(ch) = char::from_u32(code as u32) {
                 ch.to_string()
             } else {
+                log::warn!("Character code 0x{:04X} is not a valid Unicode code point", code);
                 "?".to_string()
             }
-        },
-
-        // Above Basic Multilingual Plane would require surrogate pairs
-        // These shouldn't appear as u16, but handle gracefully
-        code if code >= 0xF900 => {
-            if let Some(ch) = char::from_u32(code as u32) {
-                ch.to_string()
-            } else {
-                "?".to_string()
-            }
-        },
-
-        // ==================================================================================
-        // PRIORITY 7: Last Resort - Replacement Character
-        // ==================================================================================
-        _ => {
-            log::warn!("Character code 0x{:04X} failed all fallback strategies", char_code);
-            "?".to_string()
         },
     }
 }
@@ -1620,7 +1594,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         let char_code = ((bytes[i] as u16) << 8) | (bytes[i + 1] as u16);
                         let char_str = font
                             .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code));
+                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1629,7 +1603,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         let char_code = bytes[i] as u16;
                         let char_str = font
                             .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code));
+                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1650,7 +1624,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         let char_code = ((b as u16) << 8) | (bytes[i + 1] as u16);
                         let char_str = font
                             .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code));
+                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1658,7 +1632,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                     } else {
                         let char_str = font
                             .char_to_unicode(b as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(b as u16));
+                            .unwrap_or_else(|| fallback_char_to_unicode(b as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1681,7 +1655,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         // Fallback: multi-char mapping or unmapped byte
                         let char_str = font
                             .char_to_unicode(byte as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(byte as u16));
+                            .unwrap_or_else(|| fallback_char_to_unicode(byte as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -5217,7 +5191,7 @@ impl TextExtractor {
                                 }
                             }
                         } else {
-                            let fb = fallback_char_to_unicode(byte as u16);
+                            let fb = fallback_char_to_unicode(byte as u32);
                             if fb != "\u{FFFD}" {
                                 for ch in fb.chars() {
                                     if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
@@ -5309,7 +5283,7 @@ impl TextExtractor {
                                 }
                             }
                         } else {
-                            let fb = fallback_char_to_unicode(byte as u16);
+                            let fb = fallback_char_to_unicode(byte as u32);
                             if fb != "\u{FFFD}" {
                                 for ch in fb.chars() {
                                     if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {

@@ -409,6 +409,18 @@ impl FontInfo {
         // Symbolic flag on non-symbolic fonts. When an explicit /Encoding entry exists,
         // we always parse it — real-world PDF viewers (MuPDF, poppler, pdf.js) do the same.
         // The Symbolic flag only controls behavior when NO /Encoding is present.
+        // Pre-parse font program encoding (needed for /Differences base encoding per PDF spec)
+        let font_program_enc_cache: Option<HashMap<u8, char>> =
+            if let Some(font_data) = &embedded_font_data {
+                if subtype == "Type1" || subtype == "MMType1" {
+                    super::type1_encoding::parse_type1_encoding(font_data)
+                } else {
+                    super::cff_encoding::parse_cff_encoding(font_data)
+                }
+            } else {
+                None
+            };
+
         let (encoding, diff_multi_char_map) = if let Some(enc_obj) = font_dict.get("Encoding") {
             let resolved_enc_obj = if let Some(obj_ref) = enc_obj.as_reference() {
                 doc.load_object(obj_ref)?
@@ -426,7 +438,7 @@ impl FontInfo {
                 log::debug!("Font '{}' using /Encoding entry", base_font);
             }
             let (mut parsed_enc, mut multi_map) =
-                Self::parse_encoding(&resolved_enc_obj, doc)?;
+                Self::parse_encoding(&resolved_enc_obj, doc, font_program_enc_cache.as_ref())?;
 
             // When /Encoding is a named encoding (e.g., /WinAnsiEncoding) AND the font
             // has an embedded program, merge the font program's encoding. This handles
@@ -434,95 +446,60 @@ impl FontInfo {
             // (e.g., space at 0xCA) that the named encoding maps differently.
             // The font program's mappings override the standard encoding.
             if matches!(parsed_enc, Encoding::Standard(_)) {
-                if let Some(font_data) = &embedded_font_data {
-                    let font_program_enc = if subtype == "Type1" || subtype == "MMType1" {
-                        super::type1_encoding::parse_type1_encoding(font_data)
-                    } else {
-                        super::cff_encoding::parse_cff_encoding(font_data)
+                if let Some(prog_enc) = &font_program_enc_cache {
+                    log::info!(
+                        "Font '{}': merging {} font program encoding entries with {}",
+                        base_font,
+                        prog_enc.len(),
+                        match &parsed_enc {
+                            Encoding::Standard(n) => n.as_str(),
+                            _ => "custom",
+                        }
+                    );
+                    // Build Custom map: start with standard encoding, overlay font program
+                    let std_name = match &parsed_enc {
+                        Encoding::Standard(n) => n.clone(),
+                        _ => "StandardEncoding".to_string(),
                     };
-                    if let Some(prog_enc) = font_program_enc {
-                        log::info!(
-                            "Font '{}': merging {} font program encoding entries with {}",
-                            base_font,
-                            prog_enc.len(),
-                            match &parsed_enc {
-                                Encoding::Standard(n) => n.as_str(),
-                                _ => "custom",
-                            }
-                        );
-                        // Build Custom map: start with standard encoding, overlay font program
-                        let std_name = match &parsed_enc {
-                            Encoding::Standard(n) => n.clone(),
-                            _ => "StandardEncoding".to_string(),
-                        };
-                        let mut custom_map: HashMap<u8, char> = HashMap::new();
-                        for code in 0u8..=255 {
-                            if let Some(unicode_str) = standard_encoding_lookup(&std_name, code) {
-                                if let Some(ch) = unicode_str.chars().next() {
-                                    custom_map.insert(code, ch);
-                                }
+                    let mut custom_map: HashMap<u8, char> = HashMap::new();
+                    for code in 0u8..=255 {
+                        if let Some(unicode_str) = standard_encoding_lookup(&std_name, code) {
+                            if let Some(ch) = unicode_str.chars().next() {
+                                custom_map.insert(code, ch);
                             }
                         }
-                        // Font program overrides
-                        for (&code, &ch) in &prog_enc {
-                            custom_map.insert(code, ch);
-                            if is_ligature_char(ch) {
-                                if let Some(expanded) = expand_ligature_char(ch) {
-                                    multi_map.insert(code, expanded.to_string());
-                                }
-                            }
-                        }
-                        parsed_enc = Encoding::Custom(custom_map);
                     }
+                    // Font program overrides
+                    for (&code, &ch) in prog_enc {
+                        custom_map.insert(code, ch);
+                        if is_ligature_char(ch) {
+                            if let Some(expanded) = expand_ligature_char(ch) {
+                                multi_map.insert(code, expanded.to_string());
+                            }
+                        }
+                    }
+                    parsed_enc = Encoding::Custom(custom_map);
                 }
             }
 
             (parsed_enc, multi_map)
         } else {
-            // Try font program's built-in encoding before any default
-            let mut font_program_result = None;
-            if let Some(font_data) = &embedded_font_data {
-                // Try Type1 encoding (FontFile)
-                if subtype == "Type1" || subtype == "MMType1" {
-                    if let Some(enc) = super::type1_encoding::parse_type1_encoding(font_data) {
-                        log::info!(
-                            "Font '{}' using Type 1 built-in encoding ({} mappings)",
-                            base_font,
-                            enc.len()
-                        );
-                        let mut multi_map: HashMap<u8, String> = HashMap::new();
-                        for (&code, &ch) in &enc {
-                            if is_ligature_char(ch) {
-                                if let Some(expanded) = expand_ligature_char(ch) {
-                                    multi_map.insert(code, expanded.to_string());
-                                }
-                            }
+            // No /Encoding entry — use font program's built-in encoding if available
+            if let Some(prog_enc) = font_program_enc_cache {
+                log::info!(
+                    "Font '{}' using built-in font program encoding ({} mappings)",
+                    base_font,
+                    prog_enc.len()
+                );
+                let mut multi_map: HashMap<u8, String> = HashMap::new();
+                for (&code, &ch) in &prog_enc {
+                    if is_ligature_char(ch) {
+                        if let Some(expanded) = expand_ligature_char(ch) {
+                            multi_map.insert(code, expanded.to_string());
                         }
-                        font_program_result = Some((Encoding::Custom(enc), multi_map));
                     }
                 }
-                // Try CFF encoding (FontFile3)
-                if font_program_result.is_none() {
-                    if let Some(enc) = super::cff_encoding::parse_cff_encoding(font_data) {
-                        log::info!(
-                            "Font '{}' using CFF built-in encoding ({} mappings)",
-                            base_font,
-                            enc.len()
-                        );
-                        let mut multi_map: HashMap<u8, String> = HashMap::new();
-                        for (&code, &ch) in &enc {
-                            if is_ligature_char(ch) {
-                                if let Some(expanded) = expand_ligature_char(ch) {
-                                    multi_map.insert(code, expanded.to_string());
-                                }
-                            }
-                        }
-                        font_program_result = Some((Encoding::Custom(enc), multi_map));
-                    }
-                }
-            }
-            if let Some(result) = font_program_result {
-                result
+                (Encoding::Custom(prog_enc), multi_map)
             } else if is_symbolic_font(flags) {
                 log::debug!(
                     "Font '{}' is symbolic with no /Encoding - will use built-in encoding (Symbol/ZapfDingbats)",
@@ -1183,6 +1160,7 @@ impl FontInfo {
     fn parse_encoding(
         enc_obj: &Object,
         doc: &mut PdfDocument,
+        font_program_encoding: Option<&HashMap<u8, char>>,
     ) -> Result<(Encoding, HashMap<u8, String>)> {
         let empty_map = HashMap::new();
         // Encoding can be either a name or a dictionary
@@ -1268,8 +1246,13 @@ impl FontInfo {
                 } else {
                     HashMap::new()
                 }
+            } else if let Some(prog_enc) = font_program_encoding {
+                // PDF Spec ISO 32000-1:2008, Section 9.6.6.1:
+                // "If BaseEncoding is absent and the font has a built-in encoding,
+                // the built-in encoding shall be used as the base encoding."
+                prog_enc.clone()
             } else {
-                // No base encoding specified - start with StandardEncoding as default
+                // No base encoding specified and no font program - use StandardEncoding as default
                 let mut map = HashMap::new();
                 for code in 0u8..=255 {
                     if let Some(unicode_str) = standard_encoding_lookup("StandardEncoding", code) {

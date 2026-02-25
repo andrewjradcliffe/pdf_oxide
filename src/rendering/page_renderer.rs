@@ -567,7 +567,7 @@ impl PageRenderer {
         _gs: &GraphicsState,
         resources: &Object,
         doc: &mut PdfDocument,
-        _page_num: usize,
+        page_num: usize,
         clip_mask: Option<&tiny_skia::Mask>,
     ) -> Result<()> {
         // Get XObject from resources
