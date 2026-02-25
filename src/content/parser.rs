@@ -228,6 +228,124 @@ pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
     Ok(operators)
 }
 
+/// Streaming text-only parser: parse operators and call handler immediately.
+///
+/// Same logic as `parse_content_stream_text_only` but avoids allocating a Vec<Operator>.
+/// Each operator is passed to `handler` as soon as it's parsed, improving cache locality
+/// and eliminating the intermediate operator vector (which can be 16MB+ for graphics-heavy pages).
+pub fn parse_and_execute_text_only<F>(data: &[u8], mut handler: F) -> Result<()>
+where
+    F: FnMut(Operator) -> Result<()>,
+{
+    let mut input = data;
+    let mut consecutive_errors: usize = 0;
+    let mut inside_text = false;
+    let mut op_count: usize = 0;
+
+    while !input.is_empty() {
+        if let Ok((rest, _)) = multispace0::<&[u8], nom::error::Error<&[u8]>>.parse(input) {
+            input = rest;
+        }
+        if input.is_empty() {
+            break;
+        }
+
+        if op_count >= MAX_OPERATORS {
+            log::warn!("Content stream exceeded {} operators, truncating", MAX_OPERATORS);
+            break;
+        }
+
+        if inside_text {
+            match parse_operator_with_operands(input) {
+                Ok((rest, op)) => {
+                    if matches!(op, Operator::EndText) {
+                        inside_text = false;
+                    }
+                    handler(op)?;
+                    op_count += 1;
+                    input = rest;
+                    consecutive_errors = 0;
+                },
+                Err(_) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        log::warn!(
+                            "Content stream had {} consecutive parse errors, bailing out ({} bytes remaining)",
+                            MAX_CONSECUTIVE_ERRORS,
+                            input.len()
+                        );
+                        break;
+                    }
+                    if input.len() > 1 {
+                        input = &input[1..];
+                    } else {
+                        break;
+                    }
+                },
+            }
+        } else {
+            match scan_graphics_region(input, &mut consecutive_errors) {
+                ScanResult::EndOfData => break,
+                ScanResult::FoundBT { rest } => {
+                    handler(Operator::BeginText)?;
+                    op_count += 1;
+                    input = rest;
+                    inside_text = true;
+                },
+                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
+                    Ok((rest2, _)) => input = rest2,
+                    Err(_) => input = rest,
+                },
+                ScanResult::NeedFullParse {
+                    operand_start,
+                    after_op,
+                } => match parse_operator_with_operands(operand_start) {
+                    Ok((rest2, op)) => {
+                        handler(op)?;
+                        op_count += 1;
+                        input = rest2;
+                    },
+                    Err(_) => input = after_op,
+                },
+                ScanResult::DeferredThenText {
+                    deferred_start,
+                    trigger_start,
+                } => {
+                    let mut remaining = deferred_start;
+                    while remaining.len() > trigger_start.len() {
+                        match parse_operator_with_operands(remaining) {
+                            Ok((rest2, op)) => {
+                                handler(op)?;
+                                op_count += 1;
+                                remaining = rest2;
+                            },
+                            Err(_) => {
+                                if remaining.len() > 1 {
+                                    remaining = &remaining[1..];
+                                } else {
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                    input = trigger_start;
+                    consecutive_errors = 0;
+                },
+                ScanResult::TooManyErrors { remaining } => {
+                    log::warn!(
+                        "Content stream had {} consecutive parse errors, bailing out ({} bytes remaining)",
+                        MAX_CONSECUTIVE_ERRORS,
+                        remaining.len()
+                    );
+                    break;
+                },
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Image-only content stream parser: skips BT/ET text blocks entirely.
 ///
 /// Only fully parses operators relevant to image extraction:

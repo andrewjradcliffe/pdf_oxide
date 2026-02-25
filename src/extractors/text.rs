@@ -8,6 +8,7 @@ use crate::config::ExtractionProfile;
 use crate::content::graphics_state::{GraphicsStateStack, Matrix};
 use crate::content::operators::{Operator, TextElement};
 use crate::content::parse_content_stream_text_only;
+use crate::content::parse_and_execute_text_only;
 use crate::error::Result;
 use crate::extract_log_debug;
 use crate::fonts::FontInfo;
@@ -1266,6 +1267,9 @@ struct TjBuffer {
     horizontal_scaling: f32,
     /// MCID when buffer started
     mcid: Option<u32>,
+    /// Accumulated width from advance_position_for_string calls.
+    /// Avoids redundant per-byte width recalculation in flush.
+    accumulated_width: f32,
 }
 
 impl TjBuffer {
@@ -1283,6 +1287,7 @@ impl TjBuffer {
             word_space: state.word_space,
             horizontal_scaling: state.horizontal_scaling,
             mcid,
+            accumulated_width: 0.0,
         }
     }
 
@@ -2410,14 +2415,12 @@ impl TextExtractor {
         self.spans.clear();
         self.span_sequence_counter = 0; // Reset sequence counter for this page
 
-        // Parse content stream into operators
+        // Streaming parse+execute: operators are processed immediately without
+        // building an intermediate Vec<Operator>. This eliminates allocation of
+        // potentially huge vectors (196K+ operators for graphics-heavy pages)
+        // and improves cache locality.
         extract_log_debug!("Parsing content stream for text extraction");
-        let operators = parse_content_stream_text_only(content_stream)?;
-
-        // Execute each operator
-        for op in operators {
-            self.execute_operator(op)?;
-        }
+        parse_and_execute_text_only(content_stream, |op| self.execute_operator(op))?;
 
         // Flush any remaining Tj buffer at end of content stream
         self.flush_tj_span_buffer()?;
@@ -2440,20 +2443,10 @@ impl TextExtractor {
 
         self.sort_spans_by_reading_order();
 
-        log::debug!("After sort_spans_by_reading_order(): {} spans", self.spans.len());
-
         // Deduplicate overlapping spans
         self.deduplicate_overlapping_spans();
 
-        // PHASE 10: DISABLED - CamelCase splitting is a linguistic heuristic not in PDF spec
-        // Per ISO 32000-1:2008, text strings are extracted as-is from the content stream.
-        // Splitting on pattern matching (e.g., "theGeneral" -> "the"/"General") requires knowledge
-        // external to the PDF spec. Spec-compliant extraction accepts malformed PDFs as-is.
-        // See: PHASE10_PDF_SPEC_COMPLIANCE.md for rationale.
-        // self.split_fused_words();
-
         // Merge adjacent spans on the same line to reconstruct complete words
-        // This will respect split_boundary_before flags set by split_fused_words()
         self.merge_adjacent_spans();
 
         Ok(std::mem::take(&mut self.spans))
@@ -3287,7 +3280,10 @@ impl TextExtractor {
                     }
 
                     // Advance position for the original text (to maintain layout)
-                    self.advance_position_for_string(&text)?;
+                    let w = self.advance_position_for_string(&text)?;
+                    if let Some(ref mut buffer) = self.tj_span_buffer {
+                        buffer.accumulated_width += w;
+                    }
                 } else {
                     // No ActualText - use standard text extraction
                     if self.extract_spans {
@@ -3307,7 +3303,10 @@ impl TextExtractor {
                         }
 
                         // Advance position (text matrix must be updated)
-                        self.advance_position_for_string(&text)?;
+                        let w = self.advance_position_for_string(&text)?;
+                        if let Some(ref mut buffer) = self.tj_span_buffer {
+                            buffer.accumulated_width += w;
+                        }
                     } else {
                         self.show_text(&text)?;
                     }
@@ -3346,7 +3345,10 @@ impl TextExtractor {
                     for element in array {
                         match element {
                             TextElement::String(s) => {
-                                self.advance_position_for_string(&s)?;
+                                let w = self.advance_position_for_string(&s)?;
+                                if let Some(ref mut buffer) = self.tj_span_buffer {
+                                    buffer.accumulated_width += w;
+                                }
                             },
                             TextElement::Offset(offset) => {
                                 self.advance_position_for_offset(offset)?;
@@ -3495,7 +3497,10 @@ impl TextExtractor {
                     if let Some(ref mut buffer) = self.tj_span_buffer {
                         buffer.append(&text, &self.fonts)?;
                     }
-                    self.advance_position_for_string(&text)?;
+                    let w = self.advance_position_for_string(&text)?;
+                    if let Some(ref mut buffer) = self.tj_span_buffer {
+                        buffer.accumulated_width += w;
+                    }
                 } else {
                     self.show_text(&text)?;
                 }
@@ -3527,7 +3532,10 @@ impl TextExtractor {
                     if let Some(ref mut buffer) = self.tj_span_buffer {
                         buffer.append(&text, &self.fonts)?;
                     }
-                    self.advance_position_for_string(&text)?;
+                    let w = self.advance_position_for_string(&text)?;
+                    if let Some(ref mut buffer) = self.tj_span_buffer {
+                        buffer.accumulated_width += w;
+                    }
                 } else {
                     self.show_text(&text)?;
                 }
@@ -4640,7 +4648,8 @@ impl TextExtractor {
                     buffer.append(s, &self.fonts)?;
 
                     // Advance position for this string
-                    self.advance_position_for_string(s)?;
+                    let w = self.advance_position_for_string(s)?;
+                    buffer.accumulated_width += w;
                 },
                 TextElement::Offset(offset) => {
                     // Track TJ offset for statistical analysis
@@ -5063,7 +5072,9 @@ impl TextExtractor {
     }
 
     /// Advance text position for a string (used in TJ array processing).
-    fn advance_position_for_string(&mut self, text: &[u8]) -> Result<()> {
+    /// Advance the text matrix position by the width of a text string.
+    /// Returns the computed width so callers can accumulate it.
+    fn advance_position_for_string(&mut self, text: &[u8]) -> Result<f32> {
         let state = self.state_stack.current();
         let font_name = state.font_name.clone();
         let font_size = state.font_size;
@@ -5098,7 +5109,7 @@ impl TextExtractor {
         state.text_matrix.e += advance * text_matrix.a;
         state.text_matrix.f += advance * text_matrix.b;
 
-        Ok(())
+        Ok(total_width)
     }
 
     /// Insert a space character as a separate span.
@@ -5202,8 +5213,8 @@ impl TextExtractor {
     fn flush_tj_span_buffer(&mut self) -> Result<()> {
         if let Some(buffer) = self.tj_span_buffer.take() {
             if !buffer.is_empty() {
-                // Calculate total width using PDF spec formula
-                let total_width = self.calculate_tj_buffer_width(&buffer)?;
+                // Use accumulated width from advance_position_for_string calls
+                let total_width = buffer.accumulated_width;
 
                 // Calculate effective font size (accounting for CTM and text matrix scaling)
                 let combined_flush = buffer.start_ctm.multiply(&buffer.start_matrix);

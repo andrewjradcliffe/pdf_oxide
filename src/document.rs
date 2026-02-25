@@ -91,6 +91,10 @@ pub struct PdfDocument {
     /// Stores the resolved font set (Arc-wrapped to avoid cloning) plus a spot-check
     /// (font_name, content_hash) pair for verification before reuse.
     font_name_set_cache: HashMap<u64, (Arc<Vec<(String, Arc<crate::fonts::FontInfo>)>>, String, u64)>,
+    /// Per-font identity cache keyed by font_identity_hash (BaseFont + Subtype + Encoding
+    /// + ToUnicode + FontDescriptor + DescendantFonts references). Skips expensive
+    /// FontInfo::from_dict() when a structurally identical font was already parsed.
+    font_identity_cache: HashMap<u64, Arc<crate::fonts::FontInfo>>,
     /// Cached structure tree (None = not yet checked, Some(None) = untagged, Some(Some) = tagged).
     /// Uses Arc to avoid expensive deep clones on every page extraction.
     structure_tree_cache: Option<Option<Arc<crate::structure::StructTreeRoot>>>,
@@ -212,6 +216,7 @@ impl PdfDocument {
             font_set_cache: HashMap::new(),
             font_fingerprint_cache: HashMap::new(),
             font_name_set_cache: HashMap::new(),
+            font_identity_cache: HashMap::new(),
             structure_tree_cache: None,
             structure_content_cache: None,
             page_cache: HashMap::new(),
@@ -5056,14 +5061,27 @@ impl PdfDocument {
                         all_from_cache = false;
                         let font = self.load_object(font_ref)?;
 
-                        // Compute identity hash for spot-check data (first font only)
+                        // Compute identity hash (cheap: 3-6 dict lookups, ~200ns)
+                        let id_hash = Self::font_identity_hash(&font);
+
+                        // Collect spot-check data (first font only) for name cache
                         if spot_check.is_none() {
-                            spot_check = Some((name.clone(), Self::font_identity_hash(&font)));
+                            spot_check = Some((name.clone(), id_hash));
+                        }
+
+                        // Layer 5: Per-font identity cache — skip from_dict when a
+                        // structurally identical font was already parsed elsewhere.
+                        if let Some(cached) = self.font_identity_cache.get(&id_hash) {
+                            let arc = Arc::clone(cached);
+                            self.font_cache.insert(font_ref, Arc::clone(&arc));
+                            extractor.add_font_shared(name.clone(), arc);
+                            continue;
                         }
 
                         match FontInfo::from_dict(&font, self) {
                             Ok(font_info) => {
                                 let arc = Arc::new(font_info);
+                                self.font_identity_cache.insert(id_hash, Arc::clone(&arc));
                                 self.font_cache.insert(font_ref, Arc::clone(&arc));
                                 extractor.add_font_shared(name.clone(), arc);
                             },
