@@ -13,6 +13,8 @@
 mod adobe_glyph_list;
 /// CFF font encoding parser for extracting built-in encoding from CFF FontFile data.
 pub mod cff_encoding;
+/// Process-level cross-document font cache for batch processing.
+pub mod global_cache;
 pub mod character_mapper;
 /// CID to Unicode mappings for predefined Adobe CJK character collections.
 pub mod cid_mappings;
@@ -29,7 +31,7 @@ pub mod truetype_parser;
 /// Type 1 font encoding parser for extracting built-in encoding from FontFile data.
 pub mod type1_encoding;
 
-pub use character_mapper::CharacterMapper;
+pub use character_mapper::{CharacterMapper, PredefinedCMapConfig};
 pub use cmap::{parse_tounicode_cmap, CMap, LazyCMap};
 pub use encoding::UnicodeEncoder;
 pub use encoding_normalizer::EncodingNormalizer;

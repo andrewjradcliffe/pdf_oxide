@@ -3114,6 +3114,72 @@ impl PdfDocument {
                         }
                     }
                 },
+                // Markup annotations (Highlight, Underline, StrikeOut, Squiggly)
+                // Per PDF Spec ISO 32000-1:2008 Section 12.5.6.10, markup annotations
+                // have a /Contents entry containing the text note associated with the markup.
+                "highlight" | "underline" | "strikeout" | "squiggly" => {
+                    if let Some(Object::String(s)) = dict.get("Contents") {
+                        let decoded = Self::decode_pdf_text_string(s);
+                        let trimmed = decoded.trim().to_string();
+                        if !trimmed.is_empty() {
+                            annot_texts.push(trimmed);
+                        }
+                    }
+                    // Also check /RC (Rich Content) for markup annotations
+                    // Per PDF Spec 12.5.6.10, /RC contains XHTML-formatted content
+                    if annot_texts.len() == len_before_annot {
+                        if let Some(Object::String(s)) = dict.get("RC") {
+                            // Strip XHTML tags to extract plain text
+                            let decoded = Self::decode_pdf_text_string(s);
+                            let plain = Self::strip_xhtml_tags(&decoded);
+                            let trimmed = plain.trim().to_string();
+                            if !trimmed.is_empty() {
+                                annot_texts.push(trimmed);
+                            }
+                        }
+                    }
+                },
+                // Link annotations - Per PDF Spec 12.5.6.5
+                // Links may have /Contents describing the link target or purpose.
+                "link" => {
+                    if let Some(Object::String(s)) = dict.get("Contents") {
+                        let decoded = Self::decode_pdf_text_string(s);
+                        let trimmed = decoded.trim().to_string();
+                        if !trimmed.is_empty() {
+                            annot_texts.push(trimmed);
+                        }
+                    }
+                },
+                // Popup annotations - Per PDF Spec 12.5.6.14
+                // Popup annotations display the /Contents of their /Parent annotation.
+                "popup" => {
+                    // Try own /Contents first
+                    let mut got_text = false;
+                    if let Some(Object::String(s)) = dict.get("Contents") {
+                        let decoded = Self::decode_pdf_text_string(s);
+                        let trimmed = decoded.trim().to_string();
+                        if !trimmed.is_empty() {
+                            annot_texts.push(trimmed);
+                            got_text = true;
+                        }
+                    }
+                    // Fall back to parent annotation's /Contents
+                    if !got_text {
+                        if let Some(parent_ref) = dict.get("Parent").and_then(|o| o.as_reference()) {
+                            if let Ok(parent_obj) = self.load_object(parent_ref) {
+                                if let Some(parent_dict) = parent_obj.as_dict() {
+                                    if let Some(Object::String(s)) = parent_dict.get("Contents") {
+                                        let decoded = Self::decode_pdf_text_string(s);
+                                        let trimmed = decoded.trim().to_string();
+                                        if !trimmed.is_empty() {
+                                            annot_texts.push(trimmed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
                 _ => {
                     // For any other annotation type, also try /Contents
                     if let Some(Object::String(s)) = dict.get("Contents") {
@@ -3334,6 +3400,24 @@ impl PdfDocument {
                 .filter_map(|&b| crate::fonts::font_dict::pdfdoc_encoding_lookup(b))
                 .collect()
         }
+    }
+
+    /// Strip XHTML tags from rich content (/RC) to extract plain text.
+    ///
+    /// Per PDF Spec ISO 32000-1:2008 Section 12.7.3.4, /RC entries contain
+    /// XHTML-formatted rich text. This method strips tags to produce plain text.
+    fn strip_xhtml_tags(xhtml: &str) -> String {
+        let mut result = String::with_capacity(xhtml.len());
+        let mut inside_tag = false;
+        for ch in xhtml.chars() {
+            match ch {
+                '<' => inside_tag = true,
+                '>' => inside_tag = false,
+                _ if !inside_tag => result.push(ch),
+                _ => {},
+            }
+        }
+        result
     }
 
     /// Check if decoded content stream data may contain text.
@@ -5242,9 +5326,26 @@ impl PdfDocument {
                             continue;
                         }
 
+                        // Layer 6: Global cross-document font cache — reuse fonts
+                        // parsed by previous PdfDocument instances in this process.
+                        if let Some(cached) =
+                            crate::fonts::global_cache::global_font_cache_get(id_hash)
+                        {
+                            self.font_identity_cache
+                                .insert(id_hash, Arc::clone(&cached));
+                            self.font_cache.insert(font_ref, Arc::clone(&cached));
+                            extractor.add_font_shared(name.clone(), cached);
+                            continue;
+                        }
+
                         match FontInfo::from_dict(&font, self) {
                             Ok(font_info) => {
                                 let arc = Arc::new(font_info);
+                                // Populate both document-level and global caches
+                                crate::fonts::global_cache::global_font_cache_insert(
+                                    id_hash,
+                                    Arc::clone(&arc),
+                                );
                                 self.font_identity_cache.insert(id_hash, Arc::clone(&arc));
                                 self.font_cache.insert(font_ref, Arc::clone(&arc));
                                 extractor.add_font_shared(name.clone(), arc);

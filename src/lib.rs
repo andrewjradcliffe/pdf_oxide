@@ -250,6 +250,11 @@ pub use document::{ExtractedImageRef, ImageFormat, PdfDocument};
 pub use error::{Error, Result};
 pub use outline::{Destination, OutlineItem};
 
+// Global font cache for batch processing
+pub use fonts::global_cache::{
+    clear_global_font_cache, global_font_cache_stats, set_global_font_cache_capacity,
+};
+
 // Internal utilities
 pub(crate) mod utils {
     //! Internal utility functions for the library.
