@@ -878,3 +878,582 @@ impl WasmPdf {
         self.bytes.len()
     }
 }
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+//
+// JsValue is not functional on non-wasm32 targets (wasm-bindgen stubs abort).
+// Tests are split into two groups:
+//   1. Native-safe: methods returning Rust types on the happy path (no JsValue at runtime)
+//   2. Wasm-only: methods that return JsValue or whose error paths create JsValue
+//
+// Run native tests:  cargo test --lib --features wasm -- wasm::tests
+// Run wasm tests:    wasm-pack test --headless --node --features wasm
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // Test Helpers
+    // ========================================================================
+
+    fn make_text_pdf(text: &str) -> Vec<u8> {
+        crate::api::Pdf::from_text(text).unwrap().into_bytes()
+    }
+
+    fn doc_from_text(text: &str) -> WasmPdfDocument {
+        WasmPdfDocument::new(&make_text_pdf(text)).unwrap()
+    }
+
+    fn make_markdown_pdf(md: &str) -> Vec<u8> {
+        crate::api::PdfBuilder::new()
+            .from_markdown(md)
+            .unwrap()
+            .into_bytes()
+    }
+
+    // ========================================================================
+    // Group: Constructor
+    // ========================================================================
+
+    #[test]
+    fn test_new_valid_pdf() {
+        let bytes = make_text_pdf("Hello world");
+        let result = WasmPdfDocument::new(&bytes);
+        assert!(result.is_ok());
+    }
+
+    // Error-path tests require JsValue::from_str() which only works on wasm32
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_new_invalid_bytes() {
+        let result = WasmPdfDocument::new(b"not a pdf at all");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_new_empty_bytes() {
+        let result = WasmPdfDocument::new(b"");
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Group: Core Read-Only
+    // ========================================================================
+
+    #[test]
+    fn test_page_count() {
+        let mut doc = doc_from_text("Hello");
+        let count = doc.page_count().unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_version() {
+        let doc = doc_from_text("Hello");
+        let ver = doc.version();
+        assert_eq!(ver.len(), 2);
+        assert!(ver[0] >= 1, "major version should be at least 1");
+    }
+
+    #[test]
+    fn test_authenticate_unencrypted() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.authenticate("password");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_has_structure_tree_false() {
+        let mut doc = doc_from_text("Hello");
+        assert!(!doc.has_structure_tree());
+    }
+
+    #[test]
+    fn test_page_count_from_markdown() {
+        let bytes = make_markdown_pdf("# Title\n\nSome content");
+        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        assert!(doc.page_count().unwrap() >= 1);
+    }
+
+    // ========================================================================
+    // Group: Text Extraction
+    // ========================================================================
+
+    #[test]
+    fn test_extract_text() {
+        let mut doc = doc_from_text("Hello world");
+        let text = doc.extract_text(0).unwrap();
+        assert!(
+            text.contains("Hello") || text.contains("world"),
+            "extracted text should contain source content, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_extract_text_invalid_page() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.extract_text(999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_all_text() {
+        let mut doc = doc_from_text("Hello world");
+        let text = doc.extract_all_text().unwrap();
+        assert!(!text.is_empty(), "extract_all_text should return non-empty");
+    }
+
+    #[test]
+    fn test_extract_text_preserves_content() {
+        let mut doc = doc_from_text("Test content 12345");
+        let text = doc.extract_text(0).unwrap();
+        assert!(
+            text.contains("12345"),
+            "should preserve numeric content, got: {}",
+            text
+        );
+    }
+
+    // ========================================================================
+    // Group: Format Conversion
+    // ========================================================================
+
+    #[test]
+    fn test_to_markdown() {
+        let mut doc = doc_from_text("Hello markdown");
+        let md = doc.to_markdown(0, None, None).unwrap();
+        assert!(!md.is_empty());
+    }
+
+    #[test]
+    fn test_to_markdown_all() {
+        let mut doc = doc_from_text("Hello markdown");
+        let md = doc.to_markdown_all(None, None).unwrap();
+        assert!(!md.is_empty());
+    }
+
+    #[test]
+    fn test_to_html() {
+        let mut doc = doc_from_text("Hello html");
+        let html = doc.to_html(0, None, None).unwrap();
+        assert!(!html.is_empty());
+    }
+
+    #[test]
+    fn test_to_html_all() {
+        let mut doc = doc_from_text("Hello html");
+        let html = doc.to_html_all(None, None).unwrap();
+        assert!(!html.is_empty());
+    }
+
+    #[test]
+    fn test_to_plain_text() {
+        let mut doc = doc_from_text("Hello plain");
+        let text = doc.to_plain_text(0).unwrap();
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn test_to_plain_text_all() {
+        let mut doc = doc_from_text("Hello plain");
+        let text = doc.to_plain_text_all().unwrap();
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn test_to_markdown_with_options() {
+        let mut doc = doc_from_text("Hello options");
+        let md = doc.to_markdown(0, Some(false), Some(false)).unwrap();
+        assert!(!md.is_empty());
+    }
+
+    #[test]
+    fn test_to_html_with_options() {
+        let mut doc = doc_from_text("Hello options");
+        let html = doc.to_html(0, Some(true), Some(false)).unwrap();
+        assert!(!html.is_empty());
+    }
+
+    // ========================================================================
+    // Group: Structured Extraction (serde_wasm_bindgen — wasm32 only)
+    // ========================================================================
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_extract_chars_ok() {
+        let mut doc = doc_from_text("ABC");
+        let result = doc.extract_chars(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_extract_spans_ok() {
+        let mut doc = doc_from_text("Hello spans");
+        let result = doc.extract_spans(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_extract_chars_invalid_page() {
+        let mut doc = doc_from_text("ABC");
+        let result = doc.extract_chars(999);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Group: Search (serde_wasm_bindgen — wasm32 only)
+    // ========================================================================
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_search_found() {
+        let mut doc = doc_from_text("Hello world test search");
+        let result = doc.search("Hello", None, Some(true), None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_search_not_found() {
+        let mut doc = doc_from_text("Hello world");
+        let result = doc.search("ZZZZZ_NONEXISTENT", None, Some(true), None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_search_page_found() {
+        let mut doc = doc_from_text("Hello searchable content");
+        let result = doc.search_page(0, "Hello", None, Some(true), None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_search_page_invalid() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.search_page(999, "Hello", None, Some(true), None, None);
+        let _ = result;
+    }
+
+    // ========================================================================
+    // Group: Image Info (serde_wasm_bindgen — wasm32 only)
+    // ========================================================================
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_extract_images_ok() {
+        let mut doc = doc_from_text("No images here");
+        let result = doc.extract_images(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_extract_images_invalid_page() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.extract_images(999);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Group: Metadata Editing
+    // ========================================================================
+
+    #[test]
+    fn test_set_title() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.set_title("My Title").is_ok());
+    }
+
+    #[test]
+    fn test_set_author() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.set_author("Author Name").is_ok());
+    }
+
+    #[test]
+    fn test_set_subject() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.set_subject("Subject Line").is_ok());
+    }
+
+    #[test]
+    fn test_set_keywords() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.set_keywords("pdf, test, rust").is_ok());
+    }
+
+    // ========================================================================
+    // Group: Page Properties
+    // ========================================================================
+
+    #[test]
+    fn test_page_rotation() {
+        let mut doc = doc_from_text("Hello");
+        let rotation = doc.page_rotation(0).unwrap();
+        assert_eq!(rotation, 0);
+    }
+
+    #[test]
+    fn test_set_page_rotation() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.set_page_rotation(0, 90).is_ok());
+        let rotation = doc.page_rotation(0).unwrap();
+        assert_eq!(rotation, 90);
+    }
+
+    #[test]
+    fn test_rotate_page() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.rotate_page(0, 90).is_ok());
+    }
+
+    #[test]
+    fn test_rotate_all_pages() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.rotate_all_pages(180).is_ok());
+    }
+
+    #[test]
+    fn test_page_media_box() {
+        let mut doc = doc_from_text("Hello");
+        let mbox = doc.page_media_box(0).unwrap();
+        assert_eq!(mbox.len(), 4, "media box should have 4 coordinates");
+        assert!(mbox[2] > mbox[0], "urx should be greater than llx");
+        assert!(mbox[3] > mbox[1], "ury should be greater than lly");
+    }
+
+    #[test]
+    fn test_set_page_media_box() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.set_page_media_box(0, 0.0, 0.0, 612.0, 792.0).is_ok());
+    }
+
+    // page_crop_box returns JsValue via serde_wasm_bindgen — wasm32 only
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_page_crop_box_unset() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.page_crop_box(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_set_page_crop_box() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.set_page_crop_box(0, 10.0, 10.0, 600.0, 780.0).is_ok());
+    }
+
+    #[test]
+    fn test_crop_margins() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.crop_margins(10.0, 10.0, 10.0, 10.0).is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_page_rotation_invalid_page() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.page_rotation(999);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Group: Erase / Whiteout
+    // ========================================================================
+
+    #[test]
+    fn test_erase_region() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.erase_region(0, 0.0, 0.0, 100.0, 100.0).is_ok());
+    }
+
+    #[test]
+    fn test_erase_regions_valid() {
+        let mut doc = doc_from_text("Hello");
+        let rects = [0.0, 0.0, 100.0, 100.0, 200.0, 200.0, 300.0, 300.0];
+        assert!(doc.erase_regions(0, &rects).is_ok());
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_erase_regions_invalid_length() {
+        let mut doc = doc_from_text("Hello");
+        let rects = [0.0, 0.0, 100.0]; // Not a multiple of 4
+        let result = doc.erase_regions(0, &rects);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clear_erase_regions() {
+        let mut doc = doc_from_text("Hello");
+        doc.erase_region(0, 0.0, 0.0, 100.0, 100.0).unwrap();
+        assert!(doc.clear_erase_regions(0).is_ok());
+    }
+
+    // ========================================================================
+    // Group: Annotations
+    // ========================================================================
+
+    #[test]
+    fn test_flatten_page_annotations() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.flatten_page_annotations(0).is_ok());
+    }
+
+    #[test]
+    fn test_flatten_all_annotations() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.flatten_all_annotations().is_ok());
+    }
+
+    // ========================================================================
+    // Group: Redaction
+    // ========================================================================
+
+    #[test]
+    fn test_apply_page_redactions() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.apply_page_redactions(0).is_ok());
+    }
+
+    #[test]
+    fn test_apply_all_redactions() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.apply_all_redactions().is_ok());
+    }
+
+    // ========================================================================
+    // Group: Image Manipulation (serde_wasm_bindgen — wasm32 only)
+    // ========================================================================
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_page_images() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.page_images(0);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Group: Save
+    // ========================================================================
+
+    #[test]
+    fn test_save_to_bytes() {
+        let mut doc = doc_from_text("Hello save");
+        let bytes = doc.save_to_bytes().unwrap();
+        assert!(!bytes.is_empty(), "saved bytes should not be empty");
+    }
+
+    #[test]
+    fn test_save_to_bytes_pdf_header() {
+        let mut doc = doc_from_text("Hello header");
+        let bytes = doc.save_to_bytes().unwrap();
+        assert!(
+            bytes.starts_with(b"%PDF"),
+            "saved bytes should start with PDF header"
+        );
+    }
+
+    #[test]
+    fn test_save_encrypted_to_bytes() {
+        let mut doc = doc_from_text("Hello encrypted");
+        let bytes = doc
+            .save_encrypted_to_bytes("pass", None, None, None, None, None)
+            .unwrap();
+        assert!(!bytes.is_empty());
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_save_roundtrip() {
+        let mut doc = doc_from_text("Roundtrip test");
+        doc.set_title("Roundtrip Title").unwrap();
+        let bytes = doc.save_to_bytes().unwrap();
+
+        let mut doc2 = WasmPdfDocument::new(&bytes).unwrap();
+        let text = doc2.extract_text(0).unwrap();
+        assert!(
+            text.contains("Roundtrip"),
+            "roundtrip should preserve text, got: {}",
+            text
+        );
+    }
+
+    // ========================================================================
+    // Group: WasmPdf Creation
+    // ========================================================================
+
+    #[test]
+    fn test_wasm_pdf_from_markdown() {
+        let result = WasmPdf::from_markdown("# Hello\n\nWorld", None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_wasm_pdf_from_html() {
+        let result = WasmPdf::from_html("<h1>Hello</h1><p>World</p>", None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_wasm_pdf_from_text() {
+        let result = WasmPdf::from_text("Hello world", None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_wasm_pdf_to_bytes() {
+        let pdf = WasmPdf::from_text("Hello bytes", None, None).unwrap();
+        let bytes = pdf.to_bytes();
+        assert!(!bytes.is_empty());
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_wasm_pdf_size() {
+        let pdf = WasmPdf::from_text("Hello size", None, None).unwrap();
+        assert!(pdf.size() > 0, "PDF size should be positive");
+    }
+
+    #[test]
+    fn test_wasm_pdf_with_metadata() {
+        let pdf = WasmPdf::from_markdown(
+            "# Test",
+            Some("Test Title".to_string()),
+            Some("Test Author".to_string()),
+        )
+        .unwrap();
+        assert!(pdf.size() > 0);
+        let mut doc = WasmPdfDocument::new(&pdf.to_bytes()).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 1);
+    }
+
+    // ========================================================================
+    // Group: Lazy Editor Init
+    // ========================================================================
+
+    #[test]
+    fn test_editor_lazy_init() {
+        let doc = doc_from_text("Hello");
+        assert!(doc.editor.is_none());
+    }
+
+    #[test]
+    fn test_editor_initialized_on_edit() {
+        let mut doc = doc_from_text("Hello");
+        assert!(doc.editor.is_none());
+        doc.set_title("Title").unwrap();
+        assert!(doc.editor.is_some());
+    }
+}

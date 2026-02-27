@@ -242,7 +242,7 @@ pub mod ocr;
 mod python;
 
 // WASM bindings (optional)
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
