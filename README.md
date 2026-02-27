@@ -186,6 +186,7 @@ maturin develop
 
 - **[Getting Started (Rust)](docs/getting-started-rust.md)** - Complete Rust guide
 - **[Getting Started (Python)](docs/getting-started-python.md)** - Complete Python guide
+- **[Getting Started (WASM)](docs/getting-started-wasm.md)** - Browser and Node.js guide
 - **[API Docs](https://docs.rs/pdf_oxide)** - Full Rust API reference
 - **[Full Documentation](https://pdf.oxide.fyi)** - Complete documentation site
 - **[Performance Benchmarks](https://pdf.oxide.fyi/docs/performance)** - Full benchmark methodology and results
