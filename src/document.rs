@@ -2796,6 +2796,12 @@ impl PdfDocument {
             return Ok(String::new());
         }
 
+        // RTL correction: reverse visual-order single-character Arabic/Hebrew span runs.
+        // Some PDFs position RTL characters individually left-to-right (visual order),
+        // but logical reading order is right-to-left. Detect runs of single-char RTL
+        // spans on the same line and reverse the text within each run.
+        Self::reverse_rtl_visual_order_runs(&mut spans);
+
         // Assemble text from spans, preserving reading order
         let mut text = String::with_capacity(spans.len() * 20); // estimate
         let mut prev_span: Option<&TextSpan> = None;
@@ -3100,6 +3106,77 @@ impl PdfDocument {
         text.chars()
             .map(|c| crate::text::kangxi::kangxi_to_unified(c).unwrap_or(c))
             .collect()
+    }
+
+    /// Reverse visual-order RTL character runs to logical reading order.
+    ///
+    /// Some PDFs position Arabic/Hebrew characters individually left-to-right
+    /// (visual order). For correct text extraction, runs of single-character
+    /// RTL spans on the same line are collected, reversed, and merged into
+    /// a single span to produce correct logical reading order.
+    fn reverse_rtl_visual_order_runs(spans: &mut Vec<TextSpan>) {
+        use crate::text::rtl_detector::is_rtl_text;
+
+        if spans.len() < 4 {
+            return;
+        }
+
+        // Process from back to front so removal indices stay valid
+        let mut i = 0;
+        while i < spans.len() {
+            // Check if this span starts an RTL single-char run
+            let is_short_rtl = spans[i].text.chars().count() <= 2
+                && spans[i].text.chars().any(|c| is_rtl_text(c as u32));
+
+            if !is_short_rtl {
+                i += 1;
+                continue;
+            }
+
+            // Find the end of this RTL run (consecutive short spans on same line)
+            let run_start = i;
+            let y = spans[i].bbox.y;
+            let mut j = i + 1;
+            while j < spans.len() {
+                let y_same = (spans[j].bbox.y - y).abs() < 2.0;
+                let is_short = spans[j].text.chars().count() <= 2;
+                let has_rtl_or_space = spans[j]
+                    .text
+                    .chars()
+                    .all(|c| is_rtl_text(c as u32) || c == ' ');
+                if y_same && is_short && has_rtl_or_space {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            let run_end = j;
+            let run_len = run_end - run_start;
+
+            // Only process runs of 4+ spans (avoid false positives)
+            if run_len >= 4 {
+                // Collect span texts in reverse order (visual LTR → logical RTL).
+                // Preserve space spans as word separators.
+                let mut reversed_text = String::new();
+                for span in spans[run_start..run_end].iter().rev() {
+                    reversed_text.push_str(&span.text);
+                }
+
+                // Merge into first span, expand bbox to cover entire run
+                let last_span = &spans[run_end - 1];
+                let new_width =
+                    (last_span.bbox.x + last_span.bbox.width) - spans[run_start].bbox.x;
+                spans[run_start].text = reversed_text;
+                spans[run_start].bbox.width = new_width;
+
+                // Remove the rest of the run
+                spans.drain(run_start + 1..run_end);
+
+                i = run_start + 1;
+            } else {
+                i = run_end;
+            }
+        }
     }
 
     /// Normalize Arabic Presentation Forms to base Unicode characters.
