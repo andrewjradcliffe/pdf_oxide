@@ -6,7 +6,7 @@ description = "MCP server for PDF extraction — gives Claude, Cursor, and AI as
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yfedoseev/pdf_oxide"
 readme = "README.md"
-keywords = ["mcp", "pdf", "ai", "text-extraction", "llm"]
+keywords = ["mcp", "pdf", "claude", "llm", "ai"]
 categories = ["command-line-utilities", "text-processing"]
 
 [[bin]]
