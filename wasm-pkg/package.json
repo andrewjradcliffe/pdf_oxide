@@ -1,6 +1,6 @@
 {
   "name": "pdf-oxide-wasm",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "High-performance PDF text extraction and manipulation via WebAssembly",
   "license": "MIT OR Apache-2.0",
   "repository": {
