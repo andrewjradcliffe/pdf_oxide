@@ -2,6 +2,13 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.14] - 2026-03-XX
+> Consolidated Text Logic, Performance, Reliability
+
+### Refactoring
+
+- **Consolidated text decoding and positioning logic** (#187) — unified the high-level `extract_text_spans()` and low-level `extract_chars()` paths into a single shared engine to prevent logic drift and ensure consistent character handling.
+
 ## [0.3.13] - 2026-03-02
 > Character Extraction Quality, Multi-byte Encoding (Issue #186)
 
