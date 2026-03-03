@@ -2,7 +2,7 @@
 
 All notable changes to PDFOxide are documented here.
 
-## [0.3.14] - 2026-03-02
+## [0.3.14] - 2026-03-03
 > Parity in API & Bug Fixing (Issue #185, #193)
 
 ### Features

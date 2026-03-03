@@ -10243,6 +10243,9 @@ mod tests {
             format: ImageFormat::Png,
             width: 100,
             height: 200,
+            bbox: None,
+            rotation: 0,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         };
         let debug = format!("{:?}", img_ref);
         assert!(debug.contains("img_001.png"));
@@ -10256,6 +10259,9 @@ mod tests {
             format: ImageFormat::Jpeg,
             width: 100,
             height: 200,
+            bbox: None,
+            rotation: 0,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         };
         let cloned = img_ref.clone();
         assert_eq!(img_ref, cloned);

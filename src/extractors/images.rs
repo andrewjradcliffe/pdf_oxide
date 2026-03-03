@@ -102,6 +102,27 @@ impl PdfImage {
         }
     }
 
+    /// Create a new PDF image with a bounding box (v0.3.12, convenience wrapper).
+    pub fn with_bbox(
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        bits_per_component: u8,
+        data: ImageData,
+        bbox: Rect,
+    ) -> Self {
+        Self::with_spatial(
+            width,
+            height,
+            color_space,
+            bits_per_component,
+            data,
+            bbox,
+            0,
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        )
+    }
+
     /// Create a new PDF image with CCITT parameters.
     pub fn with_ccitt_params(
         width: u32,
