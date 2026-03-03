@@ -107,7 +107,7 @@ wasm-bindgen = { version = "0.2", optional = true }
 web-sys = { version = "0.3", optional = true, features = ["console"] }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
-getrandom = { version = "0.3", optional = true, features = ["wasm_js"] }
+getrandom = { version = "0.4", optional = true, features = ["wasm_js"] }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 
 # Table detection - page rendering (optional)
