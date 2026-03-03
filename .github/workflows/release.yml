@@ -300,7 +300,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -368,7 +368,7 @@ jobs:
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
     steps:
       - name: Download wheel artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: wheels
           pattern: wheels-*
@@ -394,7 +394,7 @@ jobs:
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
     steps:
       - name: Download WASM artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: wasm-package
           path: wasm-out
