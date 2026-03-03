@@ -114,7 +114,7 @@ serde-wasm-bindgen = { version = "0.6", optional = true }
 pdfium-render = { version = "0.8", optional = true }
 
 # Rendering (optional - for page to image conversion)
-tiny-skia = { version = "0.11", optional = true }
+tiny-skia = { version = "0.12", optional = true }
 fontdb = { version = "0.23", optional = true }
 rustybuzz = { version = "0.20", optional = true }
 
