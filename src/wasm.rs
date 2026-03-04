@@ -435,13 +435,11 @@ impl WasmPdfDocument {
             if r.len() != 4 {
                 return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
             }
-            inner.extract_spans(page_index).map(|list| {
-                use crate::layout::SpatialCollectionFiltering;
-                list.filter_by_rect(
-                    &crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
-                    crate::layout::RectFilterMode::Intersects,
-                )
-            })
+            inner.extract_spans_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
         } else {
             inner.extract_spans(page_index)
         };
