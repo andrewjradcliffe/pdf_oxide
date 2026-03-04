@@ -975,11 +975,31 @@ impl Pdf {
     ///
     /// ```ignore
     /// let mut pdf = Pdf::open("input.pdf")?;
-    /// let img = pdf.render_page(0, &RenderOptions::default())?;
+    /// let img = pdf.render_page(0)?;
     /// img.save("page1.png")?;
     /// ```
     #[cfg(feature = "rendering")]
     pub fn render_page(
+        &mut self,
+        page_index: usize,
+    ) -> Result<crate::rendering::RenderedImage> {
+        self.render_page_with_options(page_index, &crate::rendering::RenderOptions::default())
+    }
+
+    /// Render a page with custom options.
+    ///
+    /// Requires the `rendering` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("input.pdf")?;
+    /// let options = RenderOptions::with_dpi(300);
+    /// let img = pdf.render_page_with_options(0, &options)?;
+    /// img.save("page1.png")?;
+    /// ```
+    #[cfg(feature = "rendering")]
+    pub fn render_page_with_options(
         &mut self,
         page_index: usize,
         options: &crate::rendering::RenderOptions,
@@ -992,16 +1012,6 @@ impl Pdf {
                 "No document loaded. Use Pdf::open() or create one from content.".to_string(),
             ))
         }
-    }
-
-    /// Render a page with custom options (alias for render_page for API compatibility).
-    #[cfg(feature = "rendering")]
-    pub fn render_page_with_options(
-        &mut self,
-        page_index: usize,
-        options: &crate::rendering::RenderOptions,
-    ) -> Result<crate::rendering::RenderedImage> {
-        self.render_page(page_index, options)
     }
 
     /// Render a page to a file with default options (150 DPI).

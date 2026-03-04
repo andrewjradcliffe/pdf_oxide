@@ -163,6 +163,7 @@ impl PyPdfDocument {
     ///     >>> doc = PdfDocument("sample.pdf")
     ///     >>> text = doc.extract_text(0)
     ///     >>> print(text[:100])
+    #[pyo3(signature = (page, region=None))]
     fn extract_text(
         &mut self,
         page: usize,
@@ -217,6 +218,7 @@ impl PyPdfDocument {
     ///     >>> with open("page0.png", "wb") as f:
     ///     ...     f.write(image_bytes)
     #[cfg(feature = "rendering")]
+    #[pyo3(signature = (page, dpi=None, format=None))]
     fn render_page(
         &mut self,
         page: usize,
@@ -260,9 +262,23 @@ impl PyPdfDocument {
     ///     >>> chars = doc.extract_chars(0)
     ///     >>> for ch in chars:
     ///     ...     print(f"'{ch.char}' at ({ch.bbox.x:.1f}, {ch.bbox.y:.1f})")
-    fn extract_chars(&mut self, page: usize) -> PyResult<Vec<PyTextChar>> {
-        self.inner
-            .extract_chars(page)
+    #[pyo3(signature = (page, region=None))]
+    fn extract_chars(
+        &mut self,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Vec<PyTextChar>> {
+        let chars_result = if let Some((x, y, w, h)) = region {
+            self.inner.extract_chars_in_rect(
+                page,
+                crate::geometry::Rect::new(x, y, w, h),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            self.inner.extract_chars(page)
+        };
+
+        chars_result
             .map(|chars| {
                 chars
                     .into_iter()
@@ -285,6 +301,7 @@ impl PyPdfDocument {
     ///     >>> words = doc.extract_words(0)
     ///     >>> for w in words:
     ///     ...     print(f"{w.text} at {w.bbox}")
+    #[pyo3(signature = (page, region=None))]
     fn extract_words(
         &mut self,
         page: usize,
@@ -313,6 +330,7 @@ impl PyPdfDocument {
     ///
     /// Returns:
     ///     list[TextLine]: List of text lines with bounding boxes
+    #[pyo3(signature = (page, region=None))]
     fn extract_text_lines(
         &mut self,
         page: usize,
@@ -1687,6 +1705,7 @@ impl PyPdfDocument {
     ///     >>> images = doc.extract_images(0)
     ///     >>> for img in images:
     ///     ...     print(f"{img['width']}x{img['height']} {img['color_space']}")
+    #[pyo3(signature = (page, region=None))]
     fn extract_images(
         &mut self,
         py: Python<'_>,
@@ -1815,9 +1834,23 @@ impl PyPdfDocument {
     ///     >>> spans = doc.extract_spans(0)
     ///     >>> for span in spans:
     ///     ...     print(f"'{span.text}' font={span.font_name} size={span.font_size}")
-    fn extract_spans(&mut self, page: usize) -> PyResult<Vec<PyTextSpan>> {
-        self.inner
-            .extract_spans(page)
+    #[pyo3(signature = (page, region=None))]
+    fn extract_spans(
+        &mut self,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Vec<PyTextSpan>> {
+        let spans_result = if let Some((x, y, w, h)) = region {
+            self.inner.extract_spans_in_rect(
+                page,
+                crate::geometry::Rect::new(x, y, w, h),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            self.inner.extract_spans(page)
+        };
+
+        spans_result
             .map(|spans| spans.into_iter().map(|s| PyTextSpan { inner: s }).collect())
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract spans: {}", e)))
     }
@@ -1971,6 +2004,7 @@ impl PyPdfDocument {
     ///
     /// Args:
     ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
     ///
     /// Returns:
     ///     list[dict]: List of paths with bbox, stroke, fill, and styling
@@ -1980,11 +2014,20 @@ impl PyPdfDocument {
     ///     >>> paths = doc.extract_paths(0)
     ///     >>> for p in paths:
     ///     ...     print(f"Path at {p['bbox']}, stroke={p['stroke_color']}")
-    fn extract_paths(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
-        let paths = self
-            .inner
-            .extract_paths(page)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract paths: {}", e)))?;
+    #[pyo3(signature = (page, region=None))]
+    fn extract_paths(
+        &mut self,
+        py: Python<'_>,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Py<PyAny>> {
+        let paths = if let Some((x, y, w, h)) = region {
+            self.inner
+                .extract_paths_in_rect(page, crate::geometry::Rect::new(x, y, w, h))
+        } else {
+            self.inner.extract_paths(page)
+        }
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract paths: {}", e)))?;
 
         let py_list = pyo3::types::PyList::empty(py);
         for path in &paths {
@@ -2000,14 +2043,24 @@ impl PyPdfDocument {
     ///
     /// Args:
     ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
     ///
     /// Returns:
     ///     list[dict]: List of rectangles
-    fn extract_rects(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
-        let paths = self
-            .inner
-            .extract_rects(page)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract rects: {}", e)))?;
+    #[pyo3(signature = (page, region=None))]
+    fn extract_rects(
+        &mut self,
+        py: Python<'_>,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Py<PyAny>> {
+        let paths = if let Some((x, y, w, h)) = region {
+            self.inner
+                .extract_rects_in_rect(page, crate::geometry::Rect::new(x, y, w, h))
+        } else {
+            self.inner.extract_rects(page)
+        }
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract rects: {}", e)))?;
 
         let py_list = pyo3::types::PyList::empty(py);
         for path in &paths {
@@ -2022,14 +2075,24 @@ impl PyPdfDocument {
     ///
     /// Args:
     ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
     ///
     /// Returns:
     ///     list[dict]: List of lines
-    fn extract_lines(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
-        let paths = self
-            .inner
-            .extract_lines(page)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))?;
+    #[pyo3(signature = (page, region=None))]
+    fn extract_lines(
+        &mut self,
+        py: Python<'_>,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Py<PyAny>> {
+        let paths = if let Some((x, y, w, h)) = region {
+            self.inner
+                .extract_lines_in_rect(page, crate::geometry::Rect::new(x, y, w, h))
+        } else {
+            self.inner.extract_lines(page)
+        }
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))?;
 
         let py_list = pyo3::types::PyList::empty(py);
         for path in &paths {

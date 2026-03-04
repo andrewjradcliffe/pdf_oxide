@@ -155,13 +155,34 @@ impl WasmPdfDocument {
     /// Extract plain text from a single page.
     ///
     /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     #[wasm_bindgen(js_name = "extractText")]
-    pub fn extract_text(&mut self, page_index: usize) -> Result<String, JsValue> {
-        self.inner
+    pub fn extract_text(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<String, JsValue> {
+        let mut inner = self
+            .inner
             .lock()
-            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
-            .extract_text(page_index)
-            .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+
+        if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner
+                .extract_text_in_rect(
+                    page_index,
+                    crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+                .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+        } else {
+            inner
+                .extract_text(page_index)
+                .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+        }
     }
 
     /// Extract plain text from all pages, separated by form feed characters.
@@ -358,14 +379,36 @@ impl WasmPdfDocument {
     ///
     /// Returns an array of objects with: char, bbox {x, y, width, height},
     /// font_name, font_size, font_weight, is_italic, color {r, g, b}, etc.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     #[wasm_bindgen(js_name = "extractChars")]
-    pub fn extract_chars(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let chars = self
+    pub fn extract_chars(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
             .inner
             .lock()
-            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
-            .extract_chars(page_index)
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+
+        let chars_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_chars_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            inner.extract_chars(page_index)
+        };
+
+        let chars = chars_result
             .map_err(|e| JsValue::from_str(&format!("Failed to extract chars: {}", e)))?;
+
         serde_wasm_bindgen::to_value(&chars)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
@@ -768,15 +811,33 @@ impl WasmPdfDocument {
     /// Extract vector paths (lines, curves, shapes) from a page.
     ///
     /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     /// @returns Array of path objects with bbox, stroke_color, fill_color, etc.
     #[wasm_bindgen(js_name = "extractPaths")]
-    pub fn extract_paths(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let paths = self
+    pub fn extract_paths(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
             .inner
             .lock()
-            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
-            .extract_paths(page_index)
-            .map_err(|e| JsValue::from_str(&format!("Failed to extract paths: {}", e)))?;
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+
+        let paths_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_paths_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+            )
+        } else {
+            inner.extract_paths(page_index)
+        };
+
+        let paths =
+            paths_result.map_err(|e| JsValue::from_str(&format!("Failed to extract paths: {}", e)))?;
 
         let result: Vec<serde_json::Value> = paths
             .iter()

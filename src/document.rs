@@ -6080,6 +6080,44 @@ impl PdfDocument {
         Ok(lines.filter_by_rect(&region, mode))
     }
 
+    /// Extract text spans from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_spans_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::TextSpan>> {
+        use crate::layout::SpatialCollectionFiltering;
+        let spans = self.extract_spans(page_index)?;
+        Ok(spans.filter_by_rect(&region, mode))
+    }
+
+    /// Extract rectangles from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_rects_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        let rects = self.extract_rects(page_index)?;
+        Ok(rects
+            .into_iter()
+            .filter(|p| p.bbox.intersects(&region))
+            .collect())
+    }
+
+    /// Extract straight lines from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_lines_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        let lines = self.extract_lines(page_index)?;
+        Ok(lines
+            .into_iter()
+            .filter(|p| p.bbox.intersects(&region))
+            .collect())
+    }
+
     /// Extract individual characters from a specific rectangular region of a page (v0.3.14).
     pub fn extract_chars_in_rect(
         &mut self,
