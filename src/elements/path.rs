@@ -9,7 +9,7 @@ use crate::layout::Color;
 /// Vector path content that can be extracted from or written to a PDF.
 ///
 /// This represents vector graphics such as lines, curves, and shapes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PathContent {
     /// Bounding box of the path
     pub bbox: Rect,
@@ -96,6 +96,63 @@ impl PathContent {
     /// Check if this path has a fill.
     pub fn has_fill(&self) -> bool {
         self.fill_color.is_some()
+    }
+
+    /// Check if this path represents a single straight line (v0.3.14).
+    ///
+    /// A path is a straight line if it has exactly 2 operations:
+    /// MoveTo followed by LineTo.
+    pub fn is_straight_line(&self) -> bool {
+        self.operations.len() == 2
+            && matches!(self.operations[0], PathOperation::MoveTo(_, _))
+            && matches!(self.operations[1], PathOperation::LineTo(_, _))
+    }
+
+    /// Check if this path represents a single rectangle (v0.3.14).
+    ///
+    /// A path is a rectangle if it has exactly 1 operation: Rectangle,
+    /// or if it has 5 operations: MoveTo, 3x LineTo, ClosePath that form a rectangle.
+    pub fn is_rectangle(&self) -> bool {
+        // Case 1: Simple Rectangle operator (re)
+        if self.operations.len() == 1
+            && matches!(self.operations[0], PathOperation::Rectangle(_, _, _, _))
+        {
+            return true;
+        }
+
+        // Case 2: MoveTo + 3x LineTo + ClosePath
+        if self.operations.len() == 5
+            && matches!(self.operations[0], PathOperation::MoveTo(_, _))
+            && matches!(self.operations[1], PathOperation::LineTo(_, _))
+            && matches!(self.operations[2], PathOperation::LineTo(_, _))
+            && matches!(self.operations[3], PathOperation::LineTo(_, _))
+            && matches!(self.operations[4], PathOperation::ClosePath)
+        {
+            if let (
+                PathOperation::MoveTo(x0, y0),
+                PathOperation::LineTo(x1, y1),
+                PathOperation::LineTo(x2, y2),
+                PathOperation::LineTo(x3, y3),
+            ) = (
+                &self.operations[0],
+                &self.operations[1],
+                &self.operations[2],
+                &self.operations[3],
+            ) {
+                // Check if it's an axis-aligned rectangle
+                let horizontal = (y0 - y1).abs() < 0.01
+                    && (x1 - x2).abs() < 0.01
+                    && (y2 - y3).abs() < 0.01
+                    && (x3 - x0).abs() < 0.01;
+                let vertical = (x0 - x1).abs() < 0.01
+                    && (y1 - y2).abs() < 0.01
+                    && (x2 - x3).abs() < 0.01
+                    && (y3 - y0).abs() < 0.01;
+                return horizontal || vertical;
+            }
+        }
+
+        false
     }
 
     // === Convenience Constructors ===
@@ -275,7 +332,7 @@ impl Default for PathContent {
 }
 
 /// A single path operation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub enum PathOperation {
     /// Move to a point (m operator)
     MoveTo(f32, f32),
@@ -292,7 +349,7 @@ pub enum PathOperation {
 }
 
 /// Line cap style for strokes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum LineCap {
     /// Butt cap - line ends exactly at endpoint
     #[default]
@@ -304,7 +361,7 @@ pub enum LineCap {
 }
 
 /// Line join style for strokes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum LineJoin {
     /// Miter join - sharp corner
     #[default]

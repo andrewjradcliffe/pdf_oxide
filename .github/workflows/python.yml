@@ -124,7 +124,7 @@ jobs:
         run: maturin build --release --features python --out dist
 
       - name: Upload wheels as artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
@@ -152,7 +152,7 @@ jobs:
         run: maturin sdist --out dist
 
       - name: Upload sdist as artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -165,13 +165,13 @@ jobs:
     if: github.event_name == 'release' && github.event.action == 'published'
 
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: sdist
           path: dist
@@ -213,7 +213,7 @@ jobs:
         run: pdoc --html --output-dir docs-python pdf_oxide
 
       - name: Upload docs
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: python-docs
           path: docs-python/

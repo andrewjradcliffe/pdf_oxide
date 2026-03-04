@@ -58,6 +58,9 @@ pub struct TableCell {
     /// MCID values that make up this cell's content
     pub mcids: Vec<u32>,
 
+    /// Bounding box of the cell (v0.3.14)
+    pub bbox: Option<Rect>,
+
     /// Whether this is a header cell
     pub is_header: bool,
 }
@@ -116,6 +119,7 @@ impl TableCell {
             colspan: 1,
             rowspan: 1,
             mcids: Vec::new(),
+            bbox: None,
             is_header,
         }
     }

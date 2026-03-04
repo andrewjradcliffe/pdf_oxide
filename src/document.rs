@@ -1782,6 +1782,40 @@ impl PdfDocument {
         }
     }
 
+    /// Get the MediaBox of a page (v0.3.14).
+    ///
+    /// MediaBox defines the physical boundaries of the page in user space units.
+    pub fn get_page_media_box(&mut self, page_index: usize) -> Result<(f32, f32, f32, f32)> {
+        let page = self.get_page(page_index)?;
+        let page_dict = page
+            .as_dict()
+            .ok_or_else(|| Error::InvalidPdf("Page is not a dictionary".to_string()))?;
+
+        let media_box = page_dict
+            .get("MediaBox")
+            .and_then(|o| o.as_array())
+            .ok_or_else(|| Error::InvalidPdf("MediaBox not found or not an array".to_string()))?;
+
+        if media_box.len() < 4 {
+            return Err(Error::InvalidPdf("MediaBox must have at least 4 elements".to_string()));
+        }
+
+        fn to_f32(obj: &Object) -> f32 {
+            match obj {
+                Object::Integer(v) => *v as f32,
+                Object::Real(v) => *v as f32,
+                _ => 0.0,
+            }
+        }
+
+        Ok((
+            to_f32(&media_box[0]),
+            to_f32(&media_box[1]),
+            to_f32(&media_box[2]),
+            to_f32(&media_box[3]),
+        ))
+    }
+
     /// Get page count using the standard /Count field
     fn get_page_count_standard(&mut self) -> Result<usize> {
         // Load catalog
@@ -4952,6 +4986,119 @@ impl PdfDocument {
         extractor.extract(&content_data)
     }
 
+    /// Extract words from a page.
+    ///
+    /// Groups characters into words based on spatial proximity.
+    /// Uses adaptive thresholds based on the document's font size and spacing.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let words = doc.extract_words(0)?;
+    /// for word in words {
+    ///     println!("Word: {} at {:?}", word.text, word.bbox);
+    /// }
+    /// ```
+    pub fn extract_words(&mut self, page_index: usize) -> Result<Vec<crate::layout::Word>> {
+        use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, Word};
+
+        let chars = self.extract_chars(page_index)?;
+        if chars.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Compute adaptive parameters
+        let media_box = self
+            .get_page_media_box(page_index)
+            .unwrap_or((0.0, 0.0, 612.0, 792.0));
+        let page_bbox =
+            crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
+
+        let props =
+            DocumentProperties::analyze(&chars, page_bbox).map_err(Error::LayoutAnalysis)?;
+        let params = AdaptiveLayoutParams::from_properties(&props);
+
+        let clusters = clustering::cluster_chars_into_words(&chars, params.word_gap_threshold);
+
+        let mut words = Vec::new();
+        for cluster_indices in clusters {
+            let cluster_chars: Vec<_> = cluster_indices.iter().map(|&i| chars[i].clone()).collect();
+
+            // Further split clusters by whitespace characters (semantic words)
+            let mut current_word_chars = Vec::new();
+            for c in cluster_chars {
+                if c.char.is_whitespace() {
+                    if !current_word_chars.is_empty() {
+                        words.push(Word::from_chars(current_word_chars));
+                        current_word_chars = Vec::new();
+                    }
+                } else {
+                    current_word_chars.push(c);
+                }
+            }
+            if !current_word_chars.is_empty() {
+                words.push(Word::from_chars(current_word_chars));
+            }
+        }
+
+        Ok(words)
+    }
+
+    /// Extract text lines from a page.
+    ///
+    /// Groups words into lines based on vertical proximity.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let lines = doc.extract_text_lines(0)?;
+    /// for line in lines {
+    ///     println!("Line: {} at {:?}", line.text, line.bbox);
+    /// }
+    /// ```
+    pub fn extract_text_lines(
+        &mut self,
+        page_index: usize,
+    ) -> Result<Vec<crate::layout::TextLine>> {
+        use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, TextLine, Word};
+
+        let chars = self.extract_chars(page_index)?;
+        if chars.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let media_box = self
+            .get_page_media_box(page_index)
+            .unwrap_or((0.0, 0.0, 612.0, 792.0));
+        let page_bbox =
+            crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
+
+        let props =
+            DocumentProperties::analyze(&chars, page_bbox).map_err(Error::LayoutAnalysis)?;
+        let params = AdaptiveLayoutParams::from_properties(&props);
+
+        // 1. Cluster chars -> words
+        let word_clusters = clustering::cluster_chars_into_words(&chars, params.word_gap_threshold);
+        let words: Vec<_> = word_clusters
+            .into_iter()
+            .map(|indices| {
+                let cluster_chars: Vec<_> = indices.iter().map(|&i| chars[i].clone()).collect();
+                Word::from_chars(cluster_chars)
+            })
+            .collect();
+
+        // 2. Cluster words -> lines
+        let line_clusters = clustering::cluster_words_into_lines(&words, params.line_gap_threshold);
+
+        let mut lines = Vec::new();
+        for cluster_indices in line_clusters {
+            let cluster_words: Vec<_> = cluster_indices.iter().map(|&i| words[i].clone()).collect();
+            lines.push(TextLine::new(cluster_words));
+        }
+
+        Ok(lines)
+    }
+
     /// Apply intelligent text post-processing to extracted text spans.
     ///
     /// This method applies several text quality improvements:
@@ -5428,6 +5575,94 @@ impl PdfDocument {
         Ok(extractor.finish())
     }
 
+    /// Extract rectangles from a page (v0.3.14).
+    ///
+    /// Identifies paths that form axis-aligned rectangles.
+    pub fn extract_rects(
+        &mut self,
+        page_index: usize,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        let paths = self.extract_paths(page_index)?;
+        Ok(paths.into_iter().filter(|p| p.is_rectangle()).collect())
+    }
+
+    /// Extract straight lines from a page (v0.3.14).
+    ///
+    /// Identifies paths that form a single straight line segment.
+    pub fn extract_lines(
+        &mut self,
+        page_index: usize,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        let paths = self.extract_paths(page_index)?;
+        Ok(paths.into_iter().filter(|p| p.is_straight_line()).collect())
+    }
+
+    /// Extract tables from a page (v0.3.14).
+    ///
+    /// Uses a hybrid spatial algorithm that combines text alignment and vector lines
+    /// for robust table detection without explicit structure markup.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tables = doc.extract_tables(0)?;
+    /// for table in tables {
+    ///     println!("Table with {} rows and {} columns", table.rows.len(), table.col_count);
+    /// }
+    /// ```
+    pub fn extract_tables(
+        &mut self,
+        page_index: usize,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        self.extract_tables_with_config(
+            page_index,
+            crate::structure::spatial_table_detector::TableDetectionConfig::relaxed(),
+        )
+    }
+
+    /// Extract tables from a page using a custom configuration (v0.3.14).
+    pub fn extract_tables_with_config(
+        &mut self,
+        page_index: usize,
+        config: crate::structure::spatial_table_detector::TableDetectionConfig,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        use crate::structure::spatial_table_detector::detect_tables_with_lines;
+
+        // Use words instead of spans for better granularity.
+        // This ensures that strings with spaces are split into separate columns
+        // for the spatial detector.
+        let words = self.extract_words(page_index)?;
+        let lines = self.extract_lines(page_index)?;
+
+        // Convert Words to TextSpans for the spatial detector
+        let spans: Vec<_> = words
+            .into_iter()
+            .map(|w| crate::layout::TextSpan {
+                text: w.text,
+                bbox: w.bbox,
+                font_name: w.dominant_font,
+                font_size: w.avg_font_size,
+                font_weight: if w.is_bold {
+                    crate::layout::FontWeight::Bold
+                } else {
+                    crate::layout::FontWeight::Normal
+                },
+                is_italic: w.is_italic,
+                color: crate::layout::Color::black(),
+                mcid: w.mcid,
+                sequence: 0,
+                split_boundary_before: false,
+                offset_semantic: false,
+                char_spacing: 0.0,
+                word_spacing: 0.0,
+                horizontal_scaling: 1.0,
+                primary_detected: false,
+            })
+            .collect();
+
+        Ok(detect_tables_with_lines(&spans, &lines, &config))
+    }
+
     /// Process paths from a Form XObject (Issue #40).
     ///
     /// This method recursively extracts paths from Form XObjects encountered via the `Do` operator.
@@ -5795,6 +6030,149 @@ impl PdfDocument {
         Ok(paths
             .into_iter()
             .filter(|path| path.bbox.intersects(&region))
+            .collect())
+    }
+
+    /// Extract text from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_text_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<String> {
+        use crate::layout::SpatialCollectionFiltering;
+        let words = self.extract_words(page_index)?;
+        let filtered = words.filter_by_rect(&region, mode);
+        Ok(filtered
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+
+    /// Extract words from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_words_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::Word>> {
+        use crate::layout::SpatialCollectionFiltering;
+        let words = self.extract_words(page_index)?;
+        Ok(words.filter_by_rect(&region, mode))
+    }
+
+    /// Extract text lines from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_text_lines_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::TextLine>> {
+        use crate::layout::SpatialCollectionFiltering;
+        let lines = self.extract_text_lines(page_index)?;
+        Ok(lines.filter_by_rect(&region, mode))
+    }
+
+    /// Extract text spans from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_spans_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::TextSpan>> {
+        use crate::layout::SpatialCollectionFiltering;
+        let spans = self.extract_spans(page_index)?;
+        Ok(spans.filter_by_rect(&region, mode))
+    }
+
+    /// Extract rectangles from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_rects_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        let rects = self.extract_rects(page_index)?;
+        Ok(rects
+            .into_iter()
+            .filter(|p| p.bbox.intersects(&region))
+            .collect())
+    }
+
+    /// Extract straight lines from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_lines_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        let lines = self.extract_lines(page_index)?;
+        Ok(lines
+            .into_iter()
+            .filter(|p| p.bbox.intersects(&region))
+            .collect())
+    }
+
+    /// Extract individual characters from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_chars_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::TextChar>> {
+        use crate::layout::SpatialCollectionFiltering;
+        let chars = self.extract_chars(page_index)?;
+        Ok(chars.filter_by_rect(&region, mode))
+    }
+
+    /// Extract images from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_images_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::extractors::PdfImage>> {
+        let images = self.extract_images(page_index)?;
+        Ok(images
+            .into_iter()
+            .filter(|img| {
+                if let Some(bbox) = img.bbox() {
+                    bbox.intersects(&region)
+                } else {
+                    false
+                }
+            })
+            .collect())
+    }
+
+    /// Extract tables from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_tables_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        self.extract_tables_in_rect_with_config(
+            page_index,
+            region,
+            crate::structure::spatial_table_detector::TableDetectionConfig::relaxed(),
+        )
+    }
+
+    /// Extract tables from a specific region using custom configuration (v0.3.14).
+    pub fn extract_tables_in_rect_with_config(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        config: crate::structure::spatial_table_detector::TableDetectionConfig,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        let tables = self.extract_tables_with_config(page_index, config)?;
+        Ok(tables
+            .into_iter()
+            .filter(|table| {
+                if let Some(bbox) = table.bbox {
+                    bbox.intersects(&region)
+                } else {
+                    false
+                }
+            })
             .collect())
     }
 
@@ -6246,12 +6624,54 @@ impl PdfDocument {
             }
         }
 
-        // Strategy 2: Spatial detection (untagged PDFs)
+        // Strategy 2: Hybrid spatial detection (v0.3.14)
         let config = options.table_detection_config.clone().unwrap_or_default();
-        let tables = crate::structure::detect_tables_from_spans(spans, &config);
+        let lines = self.extract_lines(page_index).unwrap_or_default();
+
+        // Use words instead of raw spans for better granularity in untagged PDFs.
+        // This ensures that strings with spaces are split into separate columns.
+        let words = self.extract_words(page_index).unwrap_or_default();
+        let word_spans: Vec<crate::layout::TextSpan> = words
+            .into_iter()
+            .map(|w| crate::layout::TextSpan {
+                text: w.text,
+                bbox: w.bbox,
+                font_name: w.dominant_font,
+                font_size: w.avg_font_size,
+                font_weight: if w.is_bold {
+                    crate::layout::FontWeight::Bold
+                } else {
+                    crate::layout::FontWeight::Normal
+                },
+                is_italic: w.is_italic,
+                color: crate::layout::Color::black(),
+                mcid: w.mcid,
+                sequence: 0,
+                split_boundary_before: false,
+                offset_semantic: false,
+                char_spacing: 0.0,
+                word_spacing: 0.0,
+                horizontal_scaling: 1.0,
+                primary_detected: false,
+            })
+            .collect();
+
+        // Fall back to raw spans if word extraction failed
+        let input_spans = if !word_spans.is_empty() {
+            &word_spans
+        } else {
+            spans
+        };
+
+        let tables = crate::structure::spatial_table_detector::detect_tables_with_lines(
+            input_spans,
+            &lines,
+            &config,
+        );
+
         if !tables.is_empty() {
             log::debug!(
-                "Found {} table(s) via spatial detection for page {}",
+                "Found {} table(s) via hybrid spatial detection for page {}",
                 tables.len(),
                 page_index
             );
@@ -7317,19 +7737,15 @@ impl PdfDocument {
                 if let Ok(mut image) =
                     extract_image_from_xobject(Some(self), xobject_for_extract, xobject_ref_opt)
                 {
-                    if let Some(rect) = image.bbox() {
-                        let new_bbox = self.transform_bbox_with_ctm(rect, ctm);
-                        image.set_bbox(new_bbox);
-                    } else {
-                        let image_rect = crate::geometry::Rect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: image.width() as f32,
-                            height: image.height() as f32,
-                        };
-                        let bbox = self.transform_bbox_with_ctm(&image_rect, ctm);
-                        image.set_bbox(bbox);
-                    }
+                    // In PDF, images are mapped from unit square (0,0 to 1,1) to the CTM.
+                    let unit_rect = crate::geometry::Rect::new(0.0, 0.0, 1.0, 1.0);
+                    let bbox = self.transform_bbox_with_ctm(&unit_rect, ctm);
+                    image.set_bbox(bbox);
+
+                    // Capture transformation matrix and rotation (v0.3.14)
+                    image.set_matrix([ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f]);
+                    image.set_rotation_degrees(Self::matrix_to_rotation(ctm));
+
                     images.push(image);
                 }
             },
@@ -7567,16 +7983,28 @@ impl PdfDocument {
         let mut image =
             crate::extractors::extract_image_from_xobject(Some(self), &stream_obj, None)?;
 
-        // Apply full CTM transform for bbox (handles rotation/shear correctly)
-        let image_rect = crate::geometry::Rect {
-            x: 0.0,
-            y: 0.0,
-            width: image.width() as f32,
-            height: image.height() as f32,
-        };
-        image.set_bbox(self.transform_bbox_with_ctm(&image_rect, ctm));
+        // In PDF, images are mapped from unit square (0,0 to 1,1) to the CTM.
+        let unit_rect = crate::geometry::Rect::new(0.0, 0.0, 1.0, 1.0);
+        let bbox = self.transform_bbox_with_ctm(&unit_rect, ctm);
+        image.set_bbox(bbox);
+
+        // Capture transformation matrix and rotation (v0.3.14)
+        image.set_matrix([ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f]);
+        image.set_rotation_degrees(Self::matrix_to_rotation(ctm));
 
         Ok(image)
+    }
+
+    /// Helper to derive rotation angle from transformation matrix.
+    fn matrix_to_rotation(m: crate::content::Matrix) -> i32 {
+        // Compute angle from CTM components (atan2(b, a))
+        let angle_rad = m.b.atan2(m.a);
+        let angle_deg = (angle_rad.to_degrees().round() as i32) % 360;
+        if angle_deg < 0 {
+            angle_deg + 360
+        } else {
+            angle_deg
+        }
     }
 
     /// Transform a bounding box using CTM.
@@ -7698,6 +8126,9 @@ impl PdfDocument {
                 format,
                 width: image.width(),
                 height: image.height(),
+                bbox: image.bbox().cloned(),
+                rotation: image.rotation_degrees(),
+                matrix: image.matrix(),
             });
 
             index += 1;
@@ -7748,6 +8179,12 @@ pub struct ExtractedImageRef {
     pub width: u32,
     /// Image height in pixels
     pub height: u32,
+    /// Bounding box in PDF user space (v0.3.14)
+    pub bbox: Option<crate::geometry::Rect>,
+    /// Rotation in degrees (v0.3.14)
+    pub rotation: i32,
+    /// Transformation matrix (v0.3.14)
+    pub matrix: [f32; 6],
 }
 
 /// Image format for extracted images.
@@ -9855,6 +10292,9 @@ mod tests {
             format: ImageFormat::Png,
             width: 100,
             height: 200,
+            bbox: None,
+            rotation: 0,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         };
         let debug = format!("{:?}", img_ref);
         assert!(debug.contains("img_001.png"));
@@ -9868,6 +10308,9 @@ mod tests {
             format: ImageFormat::Jpeg,
             width: 100,
             height: 200,
+            bbox: None,
+            rotation: 0,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         };
         let cloned = img_ref.clone();
         assert_eq!(img_ref, cloned);

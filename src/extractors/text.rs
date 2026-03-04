@@ -1566,20 +1566,19 @@ enum ByteMode {
     ShiftJIS,
 }
 
-fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
-    let raw_result = if let Some(font) = font {
-        // Determine byte grouping for Type0 CID fonts based on encoding.
-        let byte_mode = if font.subtype == "Type0" {
+/// Get byte grouping mode for a font (v0.3.14).
+fn get_byte_mode(font: Option<&FontInfo>) -> ByteMode {
+    if let Some(font) = font {
+        if font.subtype == "Type0" {
             match &font.encoding {
                 crate::fonts::Encoding::Identity => ByteMode::TwoByte,
                 crate::fonts::Encoding::Standard(name) => {
-                    if name.contains("Identity") && !name.contains("OneByteIdentity") {
-                        ByteMode::TwoByte
-                    } else if name.contains("UCS2") || name.contains("UTF16") {
-                        // UniJIS-UCS2-H, UniCNS-UCS2-H, etc. — always 2-byte
+                    if (name.contains("Identity") && !name.contains("OneByteIdentity"))
+                        || name.contains("UCS2")
+                        || name.contains("UTF16")
+                    {
                         ByteMode::TwoByte
                     } else if name.contains("RKSJ") {
-                        // 90ms-RKSJ-H, 90ms-RKSJ-V — Shift-JIS variable-width
                         ByteMode::ShiftJIS
                     } else if name.contains("EUC")
                         || name.contains("GBK")
@@ -1590,10 +1589,9 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         || name.contains("KSC")
                         || name.contains("KSCms")
                     {
-                        // CJK multi-byte CMaps — treat as 2-byte since CIDs are 2-byte values
+                        // CIDs are typically 2-byte values in these CMaps
                         ByteMode::TwoByte
                     } else {
-                        // Other predefined CMaps — treat as 1-byte
                         ByteMode::OneByte
                     }
                 },
@@ -1601,88 +1599,90 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
             }
         } else {
             ByteMode::OneByte
-        };
+        }
+    } else {
+        ByteMode::OneByte
+    }
+}
 
-        match byte_mode {
-            ByteMode::TwoByte if bytes.len() >= 2 => {
-                // Type0 2-byte encoding (Identity-H/V, UCS2, etc.)
-                let mut result = String::new();
-                let mut i = 0;
-                while i < bytes.len() {
-                    if i + 1 < bytes.len() {
-                        let char_code = ((bytes[i] as u16) << 8) | (bytes[i + 1] as u16);
-                        let char_str = font
-                            .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
-                        if char_str != "\u{FFFD}" {
-                            result.push_str(&char_str);
-                        }
-                        i += 2;
-                    } else {
-                        let char_code = bytes[i] as u16;
-                        let char_str = font
-                            .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
-                        if char_str != "\u{FFFD}" {
-                            result.push_str(&char_str);
-                        }
-                        i += 1;
-                    }
-                }
-                result
+/// Iterator over characters in a PDF string based on font encoding (v0.3.14).
+struct TextCharIter<'a> {
+    bytes: &'a [u8],
+    byte_mode: ByteMode,
+    index: usize,
+}
+
+impl<'a> TextCharIter<'a> {
+    fn new(bytes: &'a [u8], font: Option<&FontInfo>) -> Self {
+        Self {
+            bytes,
+            byte_mode: get_byte_mode(font),
+            index: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for TextCharIter<'a> {
+    type Item = (u16, usize); // (char_code, bytes_consumed)
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.bytes.len() {
+            return None;
+        }
+
+        let (char_code, bytes_consumed) = match self.byte_mode {
+            ByteMode::TwoByte if self.index + 1 < self.bytes.len() => {
+                (((self.bytes[self.index] as u16) << 8) | (self.bytes[self.index + 1] as u16), 2)
             },
             ByteMode::ShiftJIS => {
-                // Shift-JIS variable-width: bytes 0x81-0x9F and 0xE0-0xFC start
-                // 2-byte sequences; all others are single-byte.
-                let mut result = String::new();
-                let mut i = 0;
-                while i < bytes.len() {
-                    let b = bytes[i];
-                    let is_lead = (0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b);
-                    if is_lead && i + 1 < bytes.len() {
-                        let char_code = ((b as u16) << 8) | (bytes[i + 1] as u16);
-                        let char_str = font
-                            .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
-                        if char_str != "\u{FFFD}" {
-                            result.push_str(&char_str);
-                        }
-                        i += 2;
-                    } else {
-                        let char_str = font
-                            .char_to_unicode(b as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(b as u32));
-                        if char_str != "\u{FFFD}" {
-                            result.push_str(&char_str);
-                        }
-                        i += 1;
+                let b = self.bytes[self.index];
+                let is_lead = (0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b);
+                if is_lead && self.index + 1 < self.bytes.len() {
+                    (((b as u16) << 8) | (self.bytes[self.index + 1] as u16), 2)
+                } else {
+                    (b as u16, 1)
+                }
+            },
+            _ => (self.bytes[self.index] as u16, 1),
+        };
+
+        self.index += bytes_consumed;
+        Some((char_code, bytes_consumed))
+    }
+}
+
+fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
+    let raw_result = if let Some(font) = font {
+        let mut result = String::new();
+        // Use pre-computed lookup table for performance if it's a simple font
+        if font.subtype != "Type0" {
+            let table = font.get_byte_to_char_table();
+            for &byte in bytes {
+                let c = table[byte as usize];
+                if c != '\0' {
+                    result.push(c);
+                } else {
+                    // Fallback: multi-char mapping or unmapped byte
+                    let char_str = font
+                        .char_to_unicode(byte as u32)
+                        .unwrap_or_else(|| fallback_char_to_unicode(byte as u32));
+                    if char_str != "\u{FFFD}" {
+                        result.push_str(&char_str);
                     }
                 }
-                result
-            },
-            _ => {
-                // Simple fonts use single-byte character codes.
-                // Use pre-computed lookup table for single-char mappings (avoids
-                // per-byte HashMap lookups and String allocations).
-                let table = font.get_byte_to_char_table();
-                let mut result = String::with_capacity(bytes.len());
-                for &byte in bytes {
-                    let c = table[byte as usize];
-                    if c != '\0' {
-                        result.push(c);
-                    } else {
-                        // Fallback: multi-char mapping or unmapped byte
-                        let char_str = font
-                            .char_to_unicode(byte as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(byte as u32));
-                        if char_str != "\u{FFFD}" {
-                            result.push_str(&char_str);
-                        }
-                    }
+            }
+        } else {
+            // Complex font: use unified iterator for robust multi-byte decoding
+            for (char_code, _) in TextCharIter::new(bytes, Some(font)) {
+                let char_str = font
+                    .char_to_unicode(char_code as u32)
+                    .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
+                if char_str != "\u{FFFD}" {
+                    result.push_str(&char_str);
                 }
-                result
-            },
+            }
         }
+        result
     } else {
         // No font - fallback to Latin-1 (ISO 8859-1) encoding
         // Per PDF Spec ISO 32000-1:2008, Section 9.6.6, Latin-1 maps bytes 0x00-0xFF
@@ -1694,7 +1694,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
         bytes.iter().map(|&b| char::from(b)).collect()
     };
 
-    // Fix 3: Filter control characters from failed encoding resolution
+    // Filter control characters from failed encoding resolution
     // Keep: \t (0x09), \n (0x0A), \r (0x0D), and all printable chars (>= 0x20)
     let mut filtered = String::with_capacity(raw_result.len());
     for c in raw_result.chars() {
@@ -2539,6 +2539,7 @@ impl TextExtractor {
         // Enable character extraction mode
         self.extract_spans = false;
         self.chars.clear();
+        self.spans.clear(); // Ensure spans are clear so they don't poison xobject_spans_cache
 
         // Parse content stream into operators
         let operators = parse_content_stream_text_only(content_stream)?;
@@ -4417,11 +4418,13 @@ impl TextExtractor {
 
         // Span result cache: reuse extracted spans from self-contained Form XObjects.
         // Only works for XObjects with own /Resources (font context is self-contained).
-        if let Some(cached_spans) = doc.xobject_spans_cache.get(&xobject_ref) {
-            if let Some(spans) = cached_spans {
-                self.spans.extend(spans.iter().cloned());
+        if self.extract_spans {
+            if let Some(cached_spans) = doc.xobject_spans_cache.get(&xobject_ref) {
+                if let Some(spans) = cached_spans {
+                    self.spans.extend(spans.iter().cloned());
+                }
+                return Ok(());
             }
-            return Ok(());
         }
 
         // Load the XObject (now known to be Form or unknown — worth the full load)
@@ -4577,7 +4580,7 @@ impl TextExtractor {
 
                 // Cache span results for self-contained Form XObjects.
                 // Only safe when XObject has own /Resources (font context is independent of page).
-                if has_own_resources {
+                if has_own_resources && self.extract_spans {
                     let new_spans = if self.spans.len() > spans_before {
                         Some(self.spans[spans_before..].to_vec())
                     } else {
@@ -5385,19 +5388,14 @@ impl TextExtractor {
                 }
                 w_sum
             } else {
-                // Type0/CID font: use existing separate paths for Unicode decode
+                // Type0/CID font: use unified iterator for robust multi-byte decoding and widths
                 buffer.append(text)?;
-                // Width calculation: process 2-byte CID codes (Identity-H encoding)
                 let mut w_sum = 0.0f32;
-                for chunk in text.chunks(2) {
-                    let cid = if chunk.len() == 2 {
-                        ((chunk[0] as u16) << 8) | (chunk[1] as u16)
-                    } else {
-                        chunk[0] as u16
-                    };
-                    let mut w = font.get_glyph_width(cid) * fs_factor * hs_factor;
+                for (char_code, _) in TextCharIter::new(text, Some(font)) {
+                    let mut w = font.get_glyph_width(char_code) * fs_factor * hs_factor;
                     w += cs_hs;
-                    if cid == 32 {
+                    // Standard PDF space character (code 32) triggers word spacing
+                    if char_code == 32 {
                         w += ws_hs;
                     }
                     w_sum += w;
@@ -5699,9 +5697,8 @@ impl TextExtractor {
             text
         };
 
-        // Get current state values (used for all characters in this string)
+        // Get current state values
         let state = self.state_stack.current();
-        let font_name = state.font_name.clone();
         let font_size = state.font_size;
         let horizontal_scaling = state.horizontal_scaling;
         let char_space = state.char_space;
@@ -5709,66 +5706,11 @@ impl TextExtractor {
         let fill_color_rgb = state.fill_color_rgb;
         let ctm = state.ctm;
 
-        // Get current font
-        let font = font_name.as_ref().and_then(|name| self.fonts.get(name));
+        // Get current font from cached reference
+        let font = self.cached_current_font.as_deref();
 
-        // Determine byte grouping for Type0 CID fonts based on encoding.
-        let byte_mode = if let Some(font) = font {
-            if font.subtype == "Type0" {
-                match &font.encoding {
-                    crate::fonts::Encoding::Identity => ByteMode::TwoByte,
-                    crate::fonts::Encoding::Standard(name) => {
-                        if (name.contains("Identity") && !name.contains("OneByteIdentity"))
-                            || name.contains("UCS2")
-                            || name.contains("UTF16")
-                        {
-                            ByteMode::TwoByte
-                        } else if name.contains("RKSJ") {
-                            ByteMode::ShiftJIS
-                        } else if name.contains("EUC")
-                            || name.contains("GBK")
-                            || name.contains("GBpc")
-                            || name.contains("GB-")
-                            || name.contains("CNS")
-                            || name.contains("B5")
-                            || name.contains("KSC")
-                            || name.contains("KSCms")
-                        {
-                            ByteMode::TwoByte
-                        } else {
-                            ByteMode::OneByte
-                        }
-                    },
-                    _ => ByteMode::OneByte,
-                }
-            } else {
-                ByteMode::OneByte
-            }
-        } else {
-            ByteMode::OneByte
-        };
-
-        let mut i = 0;
-        while i < text.len() {
-            // Decode char_code based on byte_mode
-            let (char_code, bytes_consumed) = match byte_mode {
-                ByteMode::TwoByte if i + 1 < text.len() => {
-                    (((text[i] as u16) << 8) | (text[i + 1] as u16), 2)
-                },
-                ByteMode::ShiftJIS => {
-                    let b = text[i];
-                    let is_lead = (0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b);
-                    if is_lead && i + 1 < text.len() {
-                        (((b as u16) << 8) | (text[i + 1] as u16), 2)
-                    } else {
-                        (b as u16, 1)
-                    }
-                },
-                _ => (text[i] as u16, 1),
-            };
-            i += bytes_consumed;
-
-            // Get current text matrix (may be updated by previous characters)
+        for (char_code, _) in TextCharIter::new(text, font) {
+            // Get current text matrix (may be updated by previous characters in this string)
             let state = self.state_stack.current();
             let text_matrix = state.text_matrix;
 
@@ -5807,19 +5749,17 @@ impl TextExtractor {
             let height_device_space = effective_font_size;
 
             // Determine font weight and style
-            let font_weight = if let Some(font) = font {
-                if font.is_bold() {
-                    FontWeight::Bold
-                } else {
-                    FontWeight::Normal
-                }
+            let (font_weight, is_italic_char) = if let Some(font) = font {
+                (
+                    if font.is_bold() {
+                        FontWeight::Bold
+                    } else {
+                        FontWeight::Normal
+                    },
+                    font.is_italic(),
+                )
             } else {
-                FontWeight::Normal
-            };
-            let is_italic_char = if let Some(font) = font {
-                font.is_italic()
-            } else {
-                false
+                (FontWeight::Normal, false)
             };
 
             // Get color
@@ -5832,11 +5772,6 @@ impl TextExtractor {
 
             // Guard against malformed fonts
             let unicode_string = if unicode_string.chars().count() > 8 {
-                log::warn!(
-                    "Malformed character mapping: code 0x{:04X} maps to {} chars, truncating",
-                    char_code,
-                    unicode_string.chars().count()
-                );
                 unicode_string.chars().next().unwrap_or('?').to_string()
             } else {
                 unicode_string
@@ -5877,7 +5812,7 @@ impl TextExtractor {
                             char_width_device,
                             height_device_space,
                         ),
-                        font_name: font_name.clone().unwrap_or_default(),
+                        font_name: font.map(|f| f.base_font.clone()).unwrap_or_default(),
                         font_size: effective_font_size,
                         font_weight,
                         color,
@@ -5901,7 +5836,7 @@ impl TextExtractor {
                 }
             }
 
-            // Advance text position: Tx = (w0 * Tfs + Tc + Tw) * Th
+            // Advance position: Tx = (w0 * Tfs + Tc + Tw) * Th
             let mut tx = glyph_width_user_space;
             tx += char_space * hs_factor;
             if char_code == 32 {

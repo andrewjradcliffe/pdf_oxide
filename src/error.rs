@@ -115,6 +115,10 @@ pub enum Error {
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
 
+    /// Layout analysis error
+    #[error("Layout analysis error: {0}")]
+    LayoutAnalysis(String),
+
     /// Barcode/QR code generation error
     #[error("Barcode error: {0}")]
     Barcode(String),

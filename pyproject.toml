@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pdf_oxide"
-version = "0.3.13"
+version = "0.3.14"
 description = "The fastest Python PDF library: 0.8ms mean, 5× faster than PyMuPDF. Text extraction, markdown conversion, PDF creation. 100% pass rate on 3,830 PDFs."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -45,6 +45,12 @@ Documentation = "https://pdf.oxide.fyi/docs/getting-started/python"
 "Performance Benchmarks" = "https://pdf.oxide.fyi/docs/performance"
 Repository = "https://github.com/yfedoseev/pdf_oxide"
 "Bug Tracker" = "https://github.com/yfedoseev/pdf_oxide/issues"
+
+[project.optional-dependencies]
+ocr = [
+    # OCR requires ONNX Runtime and heavy ML dependencies
+    "onnxruntime>=1.20.1",
+]
 
 [dependency-groups]
 dev = [

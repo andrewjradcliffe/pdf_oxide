@@ -303,7 +303,7 @@ impl XfaParser {
     /// Parse the template packet.
     fn parse_template(&mut self, xml: &str) -> Result<()> {
         let mut reader = Reader::from_str(xml);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut current_field: Option<XfaField> = None;
         let mut current_page: Option<XfaPage> = None;
@@ -382,7 +382,7 @@ impl XfaParser {
                     self.context_stack.push(local_name);
                 },
                 Ok(Event::Text(e)) => {
-                    let text = e.unescape().unwrap_or_default().to_string();
+                    let text = e.xml_content().unwrap_or_default().to_string();
 
                     if let Some(parent) = self.context_stack.last() {
                         if in_items && parent == "text" {
@@ -467,7 +467,7 @@ impl XfaParser {
     /// Parse the datasets packet.
     fn parse_datasets(&mut self, xml: &str) -> Result<()> {
         let mut reader = Reader::from_str(xml);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut path_stack: Vec<String> = Vec::new();
         let mut current_text = String::new();
@@ -483,7 +483,7 @@ impl XfaParser {
                     }
                 },
                 Ok(Event::Text(e)) => {
-                    current_text = e.unescape().unwrap_or_default().to_string();
+                    current_text = e.xml_content().unwrap_or_default().to_string();
                 },
                 Ok(Event::End(ref e)) => {
                     let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();

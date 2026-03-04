@@ -22,6 +22,21 @@
 use crate::layout::text_block::TextSpan;
 use crate::structure::table_extractor::{ExtractedTable, TableCell, TableRow};
 
+/// Strategy for detecting table boundaries (v0.3.14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum TableStrategy {
+    /// Use only vector lines to define boundaries.
+    #[serde(rename = "lines")]
+    Lines,
+    /// Use only text alignment to define boundaries.
+    #[serde(rename = "text")]
+    Text,
+    /// Use both text and lines (hybrid approach).
+    #[default]
+    #[serde(rename = "both")]
+    Both,
+}
+
 /// Configuration for spatial table detection.
 ///
 /// Controls the behavior of table detection algorithms. All parameters are in user space units
@@ -32,6 +47,12 @@ pub struct TableDetectionConfig {
     ///
     /// When disabled, detect_tables_from_spans returns an empty vector.
     pub enabled: bool,
+
+    /// Strategy for horizontal boundary detection (rows).
+    pub horizontal_strategy: TableStrategy,
+
+    /// Strategy for vertical boundary detection (columns).
+    pub vertical_strategy: TableStrategy,
 
     /// X-coordinate tolerance for column detection in user space units (default: 5.0)
     ///
@@ -74,6 +95,8 @@ impl Default for TableDetectionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            horizontal_strategy: TableStrategy::Both,
+            vertical_strategy: TableStrategy::Both,
             column_tolerance: 5.0,
             row_tolerance: 2.8,
             min_table_cells: 4,
@@ -91,6 +114,8 @@ impl TableDetectionConfig {
     pub fn strict() -> Self {
         Self {
             enabled: true,
+            horizontal_strategy: TableStrategy::Lines,
+            vertical_strategy: TableStrategy::Lines,
             column_tolerance: 2.0,
             row_tolerance: 1.0,
             min_table_cells: 6,
@@ -106,6 +131,8 @@ impl TableDetectionConfig {
     pub fn relaxed() -> Self {
         Self {
             enabled: true,
+            horizontal_strategy: TableStrategy::Text,
+            vertical_strategy: TableStrategy::Text,
             column_tolerance: 10.0,
             row_tolerance: 5.0,
             min_table_cells: 4,
@@ -510,6 +537,72 @@ impl SpatialTableDetector {
             })
             .collect()
     }
+
+    /// Detect tables using both text spans and vector lines (v0.3.14).
+    ///
+    /// This hybrid approach provides better results for bordered tables.
+    pub fn detect_tables_hybrid(
+        &self,
+        spans: &[TextSpan],
+        lines: &[crate::elements::PathContent],
+    ) -> Vec<ExtractedTable> {
+        detect_tables_with_lines(spans, lines, &self.config)
+    }
+}
+
+/// Hybrid table detection using text spans and vector lines (v0.3.14).
+pub fn detect_tables_with_lines(
+    spans: &[TextSpan],
+    lines: &[crate::elements::PathContent],
+    config: &TableDetectionConfig,
+) -> Vec<ExtractedTable> {
+    if !config.enabled || spans.is_empty() {
+        return Vec::new();
+    }
+
+    // Use standard spatial detection as baseline
+    let candidates = detect_tables_from_spans(spans, config);
+
+    // If both strategies are 'text', we skip line refinement
+    if (config.horizontal_strategy == TableStrategy::Text
+        && config.vertical_strategy == TableStrategy::Text)
+        || lines.is_empty()
+    {
+        return candidates;
+    }
+
+    // Refinement using lines
+    let mut refined = Vec::new();
+    for mut table in candidates {
+        if let Some(bbox) = table.bbox {
+            // Find lines that intersect with the table's bounding box
+            let table_lines: Vec<_> = lines
+                .iter()
+                .filter(|l| l.is_straight_line() && bbox.intersects(&l.bbox))
+                .collect();
+
+            // If we have lines, it's likely a bordered table
+            // In Phase 4, we use this primarily to confirm table presence
+            // and potentially adjust header detection
+            if !table_lines.is_empty() && !table.has_header {
+                // Look for a horizontal line near the top that could be a header separator
+                let header_sep_y_min = bbox.y + bbox.height * 0.7; // Top 30%
+                let has_header_sep = table_lines.iter().any(|l| {
+                    l.bbox.width > bbox.width * 0.8 && l.bbox.center().y > header_sep_y_min
+                });
+
+                if has_header_sep {
+                    table.has_header = true;
+                    if !table.rows.is_empty() {
+                        table.rows[0].is_header = true;
+                    }
+                }
+            }
+        }
+        refined.push(table);
+    }
+
+    refined
 }
 
 /// Convert grid structure to ExtractedTable
@@ -551,6 +644,17 @@ fn grid_to_extracted_table(grid: &GridStructure, spans: &[TextSpan]) -> Extracte
             // Extract text from cell spans with multi-line support
             let cell_text = extract_cell_text(cell_span_indices, spans);
 
+            // Compute cell bbox from spans
+            let cell_bbox = if cell_span_indices.is_empty() {
+                None
+            } else {
+                let mut bbox = spans[cell_span_indices[0]].bbox;
+                for &idx in &cell_span_indices[1..] {
+                    bbox = bbox.union(&spans[idx].bbox);
+                }
+                Some(bbox)
+            };
+
             // Extract MCIDs from cell spans
             let mcids = cell_span_indices
                 .iter()
@@ -566,6 +670,7 @@ fn grid_to_extracted_table(grid: &GridStructure, spans: &[TextSpan]) -> Extracte
                 colspan,
                 rowspan,
                 mcids,
+                bbox: cell_bbox,
                 is_header,
             });
         }

@@ -64,7 +64,7 @@ impl DocxConverter {
 
         // Parse XML
         let mut reader = Reader::from_str(&xml_content);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut buf = Vec::new();
         let mut current_paragraph = DocumentParagraph::default();
@@ -243,7 +243,9 @@ impl DocxConverter {
                 },
                 Ok(Event::Text(e)) => {
                     if in_text && in_run {
-                        current_run.text.push_str(&e.unescape().unwrap_or_default());
+                        current_run
+                            .text
+                            .push_str(&e.xml_content().unwrap_or_default());
                     }
                 },
                 Ok(Event::Eof) => break,
@@ -279,7 +281,7 @@ impl DocxConverter {
 
         // Simple title extraction
         let mut reader = Reader::from_str(&xml_content);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut buf = Vec::new();
         let mut in_title = false;
@@ -299,7 +301,7 @@ impl DocxConverter {
                 },
                 Ok(Event::Text(e)) => {
                     if in_title {
-                        title = Some(e.unescape().unwrap_or_default().to_string());
+                        title = Some(e.xml_content().unwrap_or_default().to_string());
                     }
                 },
                 Ok(Event::Eof) => break,

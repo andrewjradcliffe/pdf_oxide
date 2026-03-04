@@ -3,13 +3,13 @@ members = [".", "pdf_oxide_mcp", "pdf_oxide_cli"]
 
 [package]
 name = "pdf_oxide"
-version = "0.3.13"
+version = "0.3.14"
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "The fastest Rust PDF library with text extraction: 0.8ms mean, 100% pass rate on 3,830 PDFs. 5× faster than pdf_extract, 17× faster than oxidize_pdf. Extract, create, and edit PDFs."
 repository = "https://github.com/yfedoseev/pdf_oxide"
-homepage = "https://github.com/yfedoseev/pdf_oxide"
+homepage = "https://oxide.fyi"
 documentation = "https://docs.rs/pdf_oxide"
 readme = "README.md"
 keywords = ["pdf", "text-extraction", "pdf-parser", "pdf-to-markdown", "document-parser"]
@@ -68,7 +68,7 @@ stringprep = "0.1"   # SASLprep for Unicode PDF passwords (R>=5)
 x509-parser = { version = "0.18", optional = true }  # X.509 certificate parsing
 cms = { version = "0.2", optional = true }            # CMS/PKCS#7 signatures
 rsa = { version = "0.9", optional = true }            # RSA signing
-der = { version = "0.7", optional = true }            # DER encoding
+der = { version = "0.8", optional = true }            # DER encoding
 spki = { version = "0.7", optional = true }           # SubjectPublicKeyInfo
 pkcs1 = { version = "0.7", optional = true }          # PKCS#1 RSA format
 pkcs8 = { version = "0.10", optional = true }         # PKCS#8 private keys
@@ -88,7 +88,7 @@ tract-onnx = { version = "0.22", optional = true }
 tokenizers = { version = "0.15", optional = true, default-features = false, features = ["onig"] }
 
 # OCR - PaddleOCR via ONNX Runtime (optional)
-ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["ndarray"] }
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["ndarray"] }
 imageproc = { version = "0.26", optional = true }
 
 # Serialization
@@ -96,7 +96,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # XML parsing (for XMP metadata)
-quick-xml = "0.31"
+quick-xml = "0.39"
 
 # Python bindings (optional)
 # Using latest version to support Python 3.14+
@@ -107,14 +107,14 @@ wasm-bindgen = { version = "0.2", optional = true }
 web-sys = { version = "0.3", optional = true, features = ["console"] }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
-getrandom = { version = "0.3", optional = true, features = ["wasm_js"] }
+getrandom = { version = "0.4", optional = true, features = ["wasm_js"] }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 
 # Table detection - page rendering (optional)
 pdfium-render = { version = "0.8", optional = true }
 
 # Rendering (optional - for page to image conversion)
-tiny-skia = { version = "0.11", optional = true }
+tiny-skia = { version = "0.12", optional = true }
 fontdb = { version = "0.23", optional = true }
 rustybuzz = { version = "0.20", optional = true }
 
@@ -127,7 +127,7 @@ barcoders = { version = "2.0", optional = true, features = ["image"] }
 
 # Office document conversion (optional)
 calamine = { version = "0.33", optional = true }
-zip = { version = "7.0", optional = true, default-features = false, features = ["deflate"] }
+zip = { version = "8.2", optional = true, default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 criterion = "0.8"

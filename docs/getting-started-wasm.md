@@ -220,7 +220,12 @@ const allPlain = doc.toPlainTextAll();
 Get character-level and span-level data with positions and font metadata:
 
 ```javascript
-// Character-level data
+// 1. Scoped extraction (v0.3.14)
+// Area: [x, y, width, height]
+const headerRegion = doc.within(0, [0, 700, 612, 92]);
+const headerText = headerRegion.extractText();
+
+// 2. Character-level data
 const chars = doc.extractChars(0);
 // Returns: [{ char, bbox: {x, y, width, height}, font_name, font_size, font_weight, is_italic, color: {r, g, b} }, ...]
 
@@ -228,7 +233,19 @@ for (const c of chars) {
   console.log(`'${c.char}' at (${c.bbox.x}, ${c.bbox.y}) font=${c.font_name}`);
 }
 
-// Span-level data
+// 3. Word-level extraction (v0.3.14)
+const words = doc.extractWords(0);
+for (const w of words) {
+  console.log(`Word: ${w.text} at ${w.bbox.x},${w.bbox.y}`);
+}
+
+// 4. Line-level extraction (v0.3.14)
+const lines = doc.extractTextLines(0);
+for (const line of lines) {
+  console.log(`Line: ${line.text}`);
+}
+
+// 5. Span-level data
 const spans = doc.extractSpans(0);
 // Returns: [{ text, bbox, font_name, font_size, font_weight, is_italic, color }, ...]
 

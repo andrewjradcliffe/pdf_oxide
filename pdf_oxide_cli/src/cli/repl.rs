@@ -190,14 +190,36 @@ fn with_doc(
 }
 
 fn cmd_text(state: &mut ReplState, args: &str) -> pdf_oxide::Result<()> {
-    with_doc(state, args, |doc| {
-        let page_count = doc.page_count()?;
-        for i in 0..page_count {
-            let text = doc.extract_text(i)?;
-            println!("{text}");
-        }
-        Ok(())
-    })
+    if !args.is_empty() {
+        super::commands::text::run(
+            Path::new(args),
+            "plain",
+            None,
+            None,
+            None,
+            state.password.as_deref(),
+            state.json,
+        )
+    } else {
+        let path = state
+            .current_file
+            .as_ref()
+            .ok_or_else(|| {
+                pdf_oxide::Error::InvalidOperation(
+                    "No PDF loaded. Use 'open <file>' or provide a file path.".to_string(),
+                )
+            })?
+            .clone();
+        super::commands::text::run(
+            &path,
+            "plain",
+            None,
+            None,
+            None,
+            state.password.as_deref(),
+            state.json,
+        )
+    }
 }
 
 fn cmd_markdown(state: &mut ReplState, args: &str) -> pdf_oxide::Result<()> {
@@ -265,6 +287,7 @@ fn cmd_images(state: &mut ReplState, args: &str) -> pdf_oxide::Result<()> {
         super::commands::images::run(
             Path::new(args),
             None,
+            None,
             Some(Path::new(".")),
             state.password.as_deref(),
             state.json,
@@ -281,6 +304,7 @@ fn cmd_images(state: &mut ReplState, args: &str) -> pdf_oxide::Result<()> {
             .clone();
         super::commands::images::run(
             &path,
+            None,
             None,
             Some(Path::new(".")),
             state.password.as_deref(),
@@ -320,6 +344,8 @@ fn cmd_forms(state: &mut ReplState, args: &str) -> pdf_oxide::Result<()> {
             None,
             None,
             None,
+            None,
+            None,
             state.password.as_deref(),
             state.json,
         )
@@ -333,7 +359,16 @@ fn cmd_forms(state: &mut ReplState, args: &str) -> pdf_oxide::Result<()> {
                 )
             })?
             .clone();
-        super::commands::forms::run(&path, None, None, None, state.password.as_deref(), state.json)
+        super::commands::forms::run(
+            &path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            state.password.as_deref(),
+            state.json,
+        )
     }
 }
 

@@ -43,10 +43,32 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Extract plain text from a PDF
+    /// Extract text from a PDF in various formats
     Text {
         /// Input PDF file
         file: PathBuf,
+
+        /// Output format (plain, words, lines)
+        #[arg(long, value_parser = ["plain", "words", "lines"], default_value = "plain")]
+        format: String,
+
+        /// Specific area to extract from as x,y,width,height (points)
+        #[arg(long)]
+        area: Option<String>,
+    },
+
+    /// Extract vector paths from a PDF
+    Paths {
+        /// Input PDF file
+        file: PathBuf,
+
+        /// Output format (json, rects, lines)
+        #[arg(long, value_parser = ["json", "rects", "lines"], default_value = "json")]
+        format: String,
+
+        /// Specific area to extract from as x,y,width,height (points)
+        #[arg(long)]
+        area: Option<String>,
     },
 
     /// Convert PDF to Markdown
@@ -129,6 +151,10 @@ pub enum Command {
     Images {
         /// Input PDF file
         file: PathBuf,
+
+        /// Specific area to extract from as x,y,width,height (points)
+        #[arg(long)]
+        area: Option<String>,
     },
 
     /// Rotate pages by 90, 180, or 270 degrees
@@ -250,5 +276,27 @@ pub enum Command {
         /// Export form data (fdf or xfdf)
         #[arg(long, value_parser = ["fdf", "xfdf"])]
         export: Option<String>,
+
+        /// Specific area to filter fields by as x,y,width,height (points)
+        #[arg(long)]
+        area: Option<String>,
+    },
+
+    /// Render PDF pages to images (PNG/JPEG)
+    Render {
+        /// Input PDF file
+        file: PathBuf,
+
+        /// DPI for rendering (default: 150)
+        #[arg(long, default_value = "150")]
+        dpi: u32,
+
+        /// Output format (png or jpeg)
+        #[arg(long, value_parser = ["png", "jpeg"], default_value = "png")]
+        format: String,
+
+        /// JPEG quality (1-100, only for jpeg)
+        #[arg(long, default_value = "85")]
+        quality: u8,
     },
 }

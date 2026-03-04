@@ -106,13 +106,11 @@ pub fn cluster_chars_into_words(chars: &[TextChar], epsilon: f32) -> Vec<Vec<usi
 
         for &idx in &line[1..] {
             let prev_idx = *cluster.last().unwrap();
-            let prev_center = chars[prev_idx].bbox.center();
-            let curr_center = chars[idx].bbox.center();
-            let distance = ((prev_center.x - curr_center.x).powi(2)
-                + (prev_center.y - curr_center.y).powi(2))
-            .sqrt();
+            let prev_right = chars[prev_idx].bbox.right();
+            let curr_left = chars[idx].bbox.left();
+            let x_gap = (curr_left - prev_right).max(0.0);
 
-            if distance <= epsilon {
+            if x_gap <= epsilon {
                 cluster.push(idx);
             } else {
                 cluster.sort_by(|&a, &b| {
@@ -292,11 +290,11 @@ pub fn cluster_chars_into_words(chars: &[TextChar], epsilon: f32) -> Vec<Vec<usi
 
         for &idx in &line[1..] {
             let prev_idx = *cluster.last().unwrap();
-            let prev_center_x = chars[prev_idx].bbox.center().x;
-            let curr_center_x = chars[idx].bbox.center().x;
-            let dx = (curr_center_x - prev_center_x).abs();
+            let prev_right = chars[prev_idx].bbox.right();
+            let curr_left = chars[idx].bbox.left();
+            let x_gap = (curr_left - prev_right).max(0.0);
 
-            if dx <= epsilon {
+            if x_gap <= epsilon {
                 cluster.push(idx);
             } else {
                 // Sort cluster by X position (left-to-right)

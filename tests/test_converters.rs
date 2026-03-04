@@ -258,9 +258,9 @@ fn test_html_layout_multiple_elements() {
     // Verify both words' characters appear at their respective Y positions
     assert!(result.contains("top: 20px"));
     assert!(result.contains("top: 50px"));
-    // Verify characters from both words are present
-    assert!(result.contains(">F<"));
-    assert!(result.contains(">S<"));
+    // Verify words are present
+    assert!(result.contains(">First<"));
+    assert!(result.contains(">Second<"));
 }
 
 #[test]

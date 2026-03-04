@@ -133,23 +133,33 @@ Benchmarked on 3,830 PDFs from three independent public test suites (veraPDF, Mo
 from pdf_oxide import PdfDocument
 
 doc = PdfDocument("report.pdf")
-print(f"Pages: {doc.page_count}")
-print(f"Version: {doc.version}")
+print(f"Pages: {doc.page_count()}")
+print(f"Version: {doc.version()}")
 
-# Extract text from each page
-for i in range(doc.page_count):
-    text = doc.extract_text(i)
-    print(f"Page {i}: {len(text)} chars")
+# 1. Scoped extraction (v0.3.14)
+# Extract only from a specific area: (x, y, width, height)
+header = doc.within(0, (0, 700, 612, 92)).extract_text()
 
-# Character-level extraction with positions
-chars = doc.extract_chars(0)
-for ch in chars:
-    print(f"'{ch.char}' at ({ch.x:.1f}, {ch.y:.1f})")
+# 2. Word-level extraction (v0.3.14)
+words = doc.extract_words(0)
+for w in words:
+    print(f"{w.text} at {w.bbox}")
+    # Access individual characters in the word
+    # print(w.chars[0].font_name)
 
-# Password-protected PDFs
-doc = PdfDocument("encrypted.pdf")
-doc.authenticate("password")
+# 3. Line-level extraction (v0.3.14)
+lines = doc.extract_text_lines(0)
+for line in lines:
+    print(f"Line: {line.text}")
+
+# 4. Table extraction (v0.3.14)
+tables = doc.extract_tables(0)
+for table in tables:
+    print(f"Table with {table.row_count} rows")
+
+# 5. Traditional extraction
 text = doc.extract_text(0)
+chars = doc.extract_chars(0)
 ```
 
 ### Form Fields
@@ -339,4 +349,4 @@ cargo build && cargo test && cargo fmt && cargo clippy -- -D warnings
 
 ---
 
-**Rust** + **Python** + **WASM** + **CLI** + **MCP** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | 0.8ms mean | 5× faster than PyMuPDF | v0.3.13
+**Rust** + **Python** + **WASM** + **CLI** + **MCP** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | 0.8ms mean | 5× faster than PyMuPDF | v0.3.14

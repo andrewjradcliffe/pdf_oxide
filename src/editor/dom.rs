@@ -1010,6 +1010,18 @@ impl PdfPage {
         }
     }
 
+    /// Render this page to an image.
+    ///
+    /// Requires the `rendering` feature.
+    #[cfg(feature = "rendering")]
+    pub fn render(
+        &self,
+        doc: &mut crate::document::PdfDocument,
+        options: &crate::rendering::RenderOptions,
+    ) -> crate::error::Result<crate::rendering::RenderedImage> {
+        crate::rendering::render_page(doc, self.page_index, options)
+    }
+
     /// Get the root element as a PdfElement.
     pub fn root(&self) -> PdfElement {
         let id = ElementId::new();

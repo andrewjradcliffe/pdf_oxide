@@ -27,7 +27,12 @@ use std::path::Path;
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+/// A PDF image with metadata and pixel data.
+///
+/// Represents an image extracted from a PDF, including dimensions,
+/// color space information, and the actual image data (either JPEG
+/// or raw pixels).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PdfImage {
     /// Image width in pixels
     width: u32,
@@ -38,40 +43,21 @@ pub struct PdfImage {
     /// Bits per color component (typically 8)
     bits_per_component: u8,
     /// Image data (JPEG or raw pixels)
+    #[serde(skip_serializing_if = "ImageData::is_empty")]
     data: ImageData,
-    /// Optional bounding box in PDF user space
+    /// Optional bounding box in PDF user space (v0.3.14)
     bbox: Option<Rect>,
+    /// Rotation in degrees (v0.3.14)
+    rotation_degrees: i32,
+    /// Transformation matrix (v0.3.14)
+    matrix: [f32; 6],
     /// CCITT decompression parameters (for 1-bit bilevel images)
+    #[serde(skip)]
     ccitt_params: Option<crate::decoders::CcittParams>,
 }
 
 impl PdfImage {
     /// Create a new PDF image.
-    ///
-    /// # Arguments
-    ///
-    /// * `width` - Image width in pixels
-    /// * `height` - Image height in pixels
-    /// * `color_space` - Color space of the image
-    /// * `bits_per_component` - Bits per color component
-    /// * `data` - Image data (JPEG or raw pixels)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use pdf_oxide::extractors::images::{PdfImage, ColorSpace, ImageData, PixelFormat};
-    ///
-    /// let image = PdfImage::new(
-    ///     100,
-    ///     100,
-    ///     ColorSpace::DeviceRGB,
-    ///     8,
-    ///     ImageData::Raw {
-    ///         pixels: vec![0; 100 * 100 * 3],
-    ///         format: PixelFormat::RGB,
-    ///     },
-    /// );
-    /// ```
     pub fn new(
         width: u32,
         height: u32,
@@ -86,18 +72,22 @@ impl PdfImage {
             bits_per_component,
             data,
             bbox: None,
+            rotation_degrees: 0,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             ccitt_params: None,
         }
     }
 
-    /// Create a new PDF image with bounding box.
-    pub fn with_bbox(
+    /// Create a new PDF image with spatial metadata (v0.3.14).
+    pub fn with_spatial(
         width: u32,
         height: u32,
         color_space: ColorSpace,
         bits_per_component: u8,
         data: ImageData,
         bbox: Rect,
+        rotation: i32,
+        matrix: [f32; 6],
     ) -> Self {
         Self {
             width,
@@ -106,8 +96,31 @@ impl PdfImage {
             bits_per_component,
             data,
             bbox: Some(bbox),
+            rotation_degrees: rotation,
+            matrix,
             ccitt_params: None,
         }
+    }
+
+    /// Create a new PDF image with a bounding box (v0.3.12, convenience wrapper).
+    pub fn with_bbox(
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        bits_per_component: u8,
+        data: ImageData,
+        bbox: Rect,
+    ) -> Self {
+        Self::with_spatial(
+            width,
+            height,
+            color_space,
+            bits_per_component,
+            data,
+            bbox,
+            0,
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        )
     }
 
     /// Create a new PDF image with CCITT parameters.
@@ -126,6 +139,8 @@ impl PdfImage {
             bits_per_component,
             data,
             bbox: None,
+            rotation_degrees: 0,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             ccitt_params: Some(ccitt_params),
         }
     }
@@ -163,6 +178,26 @@ impl PdfImage {
     /// Set the bounding box for this image.
     pub fn set_bbox(&mut self, bbox: Rect) {
         self.bbox = Some(bbox);
+    }
+
+    /// Get rotation in degrees.
+    pub fn rotation_degrees(&self) -> i32 {
+        self.rotation_degrees
+    }
+
+    /// Set rotation in degrees.
+    pub fn set_rotation_degrees(&mut self, rotation: i32) {
+        self.rotation_degrees = rotation;
+    }
+
+    /// Get transformation matrix.
+    pub fn matrix(&self) -> [f32; 6] {
+        self.matrix
+    }
+
+    /// Set transformation matrix.
+    pub fn set_matrix(&mut self, matrix: [f32; 6]) {
+        self.matrix = matrix;
     }
 
     /// Set CCITT decompression parameters for this image.
@@ -425,7 +460,8 @@ impl PdfImage {
 ///
 /// Images can be either JPEG-encoded (pass-through from PDF) or
 /// raw pixel data that needs encoding.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
 pub enum ImageData {
     /// JPEG-encoded image data (can be saved directly)
     Jpeg(Vec<u8>),
@@ -438,12 +474,22 @@ pub enum ImageData {
     },
 }
 
+impl ImageData {
+    /// Check if image data is empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ImageData::Jpeg(data) => data.is_empty(),
+            ImageData::Raw { pixels, .. } => pixels.is_empty(),
+        }
+    }
+}
+
 /// PDF color space types.
 ///
 /// Represents the color space used by an image in a PDF document.
 ///
 /// PDF Spec: ISO 32000-1:2008, Section 8.6 - Color Spaces
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ColorSpace {
     /// Device RGB color space (3 components)
     DeviceRGB,
@@ -501,7 +547,7 @@ impl ColorSpace {
 /// Pixel format for raw image data.
 ///
 /// Represents the arrangement of color components in raw pixel data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum PixelFormat {
     /// RGB format (3 bytes per pixel: R, G, B)

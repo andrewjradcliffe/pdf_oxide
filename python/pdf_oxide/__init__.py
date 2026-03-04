@@ -58,13 +58,12 @@ from .pdf_oxide import (
     RadialGradient,
     # Extraction
     TextSpan,
+    # OCR (always available as stub if feature is off)
+    OcrConfig,
+    OcrEngine,
+    # Office (always available as stub if feature is off)
+    OfficeConverter,
 )
-
-# OCR classes are only available when built with the 'ocr' feature
-try:
-    from .pdf_oxide import OcrConfig, OcrEngine
-except ImportError:
-    pass
 
 
 __all__ = [
@@ -83,8 +82,10 @@ __all__ = [
     "PatternPresets",
     # Extraction
     "TextSpan",
-    # OCR (feature-gated)
+    # OCR
     "OcrEngine",
     "OcrConfig",
+    # Office
+    "OfficeConverter",
 ]
 __version__ = VERSION

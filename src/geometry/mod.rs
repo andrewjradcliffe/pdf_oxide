@@ -197,6 +197,27 @@ impl Rect {
         p.x >= self.left() && p.x <= self.right() && p.y >= self.top() && p.y <= self.bottom()
     }
 
+    /// Check if this rectangle fully contains another rectangle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let r1 = Rect::new(0.0, 0.0, 100.0, 100.0);
+    /// let r2 = Rect::new(10.0, 10.0, 50.0, 50.0);
+    /// let r3 = Rect::new(50.0, 50.0, 100.0, 100.0);
+    ///
+    /// assert!(r1.contains_rect(&r2));
+    /// assert!(!r1.contains_rect(&r3));
+    /// ```
+    pub fn contains_rect(&self, other: &Rect) -> bool {
+        other.left() >= self.left()
+            && other.right() <= self.right()
+            && other.top() >= self.top()
+            && other.bottom() <= self.bottom()
+    }
+
     /// Compute the union of this rectangle with another.
     ///
     /// Returns the smallest rectangle that contains both rectangles.

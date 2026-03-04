@@ -43,28 +43,36 @@ use crate::search::{SearchOptions, TextSearcher};
 // WasmPdfDocument — read, convert, search, extract, and edit PDFs
 // ============================================================================
 
+use std::sync::{Arc, Mutex};
+
 /// A PDF document loaded from bytes for use in WebAssembly.
 ///
 /// Create an instance by passing PDF file bytes to the constructor.
 /// Call `.free()` when done to release memory.
 #[wasm_bindgen]
+#[derive(Clone)]
 pub struct WasmPdfDocument {
-    inner: PdfDocument,
+    inner: Arc<Mutex<PdfDocument>>,
     /// Raw bytes for editor initialization (kept for lazy editor creation)
-    raw_bytes: Vec<u8>,
+    raw_bytes: Arc<Vec<u8>>,
     /// Lazy-initialized editor for mutation operations
-    editor: Option<DocumentEditor>,
+    editor: Option<Arc<Mutex<DocumentEditor>>>,
 }
 
+#[wasm_bindgen]
 impl WasmPdfDocument {
     /// Ensure the editor is initialized, creating it from the raw bytes if needed.
-    fn ensure_editor(&mut self) -> Result<&mut DocumentEditor, JsValue> {
+    fn ensure_editor(&mut self) -> Result<Arc<Mutex<DocumentEditor>>, JsValue> {
         if self.editor.is_none() {
-            let editor = DocumentEditor::open_from_bytes(self.raw_bytes.clone())
+            let editor = DocumentEditor::open_from_bytes(self.raw_bytes.to_vec())
                 .map_err(|e| JsValue::from_str(&format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
+            self.editor = Some(Arc::new(Mutex::new(editor)));
         }
-        Ok(self.editor.as_mut().expect("editor just initialized"))
+        Ok(self
+            .editor
+            .as_ref()
+            .expect("editor just initialized")
+            .clone())
     }
 }
 
@@ -88,8 +96,8 @@ impl WasmPdfDocument {
             .map_err(|e| JsValue::from_str(&format!("Failed to open PDF: {}", e)))?;
 
         Ok(WasmPdfDocument {
-            inner,
-            raw_bytes: bytes,
+            inner: Arc::new(Mutex::new(inner)),
+            raw_bytes: Arc::new(bytes),
             editor: None,
         })
     }
@@ -102,15 +110,21 @@ impl WasmPdfDocument {
     #[wasm_bindgen(js_name = "pageCount")]
     pub fn page_count(&mut self) -> Result<usize, JsValue> {
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .page_count()
             .map_err(|e| JsValue::from_str(&format!("Failed to get page count: {}", e)))
     }
 
     /// Get the PDF version as [major, minor].
     #[wasm_bindgen(js_name = "version")]
-    pub fn version(&self) -> Vec<u8> {
-        let (major, minor) = self.inner.version();
-        vec![major, minor]
+    pub fn version(&self) -> Result<Vec<u8>, JsValue> {
+        let (major, minor) = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .version();
+        Ok(vec![major, minor])
     }
 
     /// Authenticate with a password to decrypt an encrypted PDF.
@@ -120,14 +134,22 @@ impl WasmPdfDocument {
     #[wasm_bindgen(js_name = "authenticate")]
     pub fn authenticate(&mut self, password: &str) -> Result<bool, JsValue> {
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .authenticate(password.as_bytes())
             .map_err(|e| JsValue::from_str(&format!("Authentication failed: {}", e)))
     }
 
     /// Check if the document has a structure tree (Tagged PDF).
     #[wasm_bindgen(js_name = "hasStructureTree")]
-    pub fn has_structure_tree(&mut self) -> bool {
-        matches!(self.inner.structure_tree(), Ok(Some(_)))
+    pub fn has_structure_tree(&mut self) -> Result<bool, JsValue> {
+        Ok(matches!(
+            self.inner
+                .lock()
+                .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+                .structure_tree(),
+            Ok(Some(_))
+        ))
     }
 
     // ========================================================================
@@ -137,19 +159,84 @@ impl WasmPdfDocument {
     /// Extract plain text from a single page.
     ///
     /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     #[wasm_bindgen(js_name = "extractText")]
-    pub fn extract_text(&mut self, page_index: usize) -> Result<String, JsValue> {
-        self.inner
-            .extract_text(page_index)
-            .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+    pub fn extract_text(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<String, JsValue> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+
+        if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner
+                .extract_text_in_rect(
+                    page_index,
+                    crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+                .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+        } else {
+            inner
+                .extract_text(page_index)
+                .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+        }
     }
 
     /// Extract plain text from all pages, separated by form feed characters.
     #[wasm_bindgen(js_name = "extractAllText")]
     pub fn extract_all_text(&mut self) -> Result<String, JsValue> {
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .extract_all_text()
             .map_err(|e| JsValue::from_str(&format!("Failed to extract all text: {}", e)))
+    }
+
+    /// Focus extraction on a specific rectangular region of a page (v0.3.14).
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - [x, y, width, height] in points
+    #[wasm_bindgen(js_name = "within")]
+    pub fn within(
+        &self,
+        page_index: usize,
+        region: Vec<f32>,
+    ) -> Result<WasmPdfPageRegion, JsValue> {
+        if region.len() != 4 {
+            return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+        }
+        Ok(WasmPdfPageRegion {
+            doc: self.clone(),
+            page_index,
+            region: crate::geometry::Rect::new(region[0], region[1], region[2], region[3]),
+        })
+    }
+
+    /// Render a page to an image (PNG).
+    ///
+    /// Requires the `rendering` feature.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param dpi - Dots per inch (default: 150)
+    /// @returns Uint8Array containing the PNG image data
+    #[cfg(feature = "rendering")]
+    #[wasm_bindgen(js_name = "renderPage")]
+    pub fn render_page(&mut self, page_index: usize, dpi: Option<u32>) -> Result<Vec<u8>, JsValue> {
+        let opts = crate::rendering::RenderOptions::with_dpi(dpi.unwrap_or(150));
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let img = crate::rendering::render_page(&mut inner, page_index, &opts)
+            .map_err(|e| JsValue::from_str(&format!("Failed to render page: {}", e)))?;
+        Ok(img.as_bytes().to_vec())
     }
 
     // ========================================================================
@@ -180,6 +267,8 @@ impl WasmPdfDocument {
             opts.include_form_fields = iff;
         }
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .to_markdown(page_index, &opts)
             .map_err(|e| JsValue::from_str(&format!("Failed to convert to markdown: {}", e)))
     }
@@ -203,6 +292,8 @@ impl WasmPdfDocument {
             opts.include_form_fields = iff;
         }
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .to_markdown_all(&opts)
             .map_err(|e| JsValue::from_str(&format!("Failed to convert to markdown: {}", e)))
     }
@@ -231,6 +322,8 @@ impl WasmPdfDocument {
             opts.include_form_fields = iff;
         }
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .to_html(page_index, &opts)
             .map_err(|e| JsValue::from_str(&format!("Failed to convert to HTML: {}", e)))
     }
@@ -254,6 +347,8 @@ impl WasmPdfDocument {
             opts.include_form_fields = iff;
         }
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .to_html_all(&opts)
             .map_err(|e| JsValue::from_str(&format!("Failed to convert to HTML: {}", e)))
     }
@@ -263,6 +358,8 @@ impl WasmPdfDocument {
     pub fn to_plain_text(&mut self, page_index: usize) -> Result<String, JsValue> {
         let opts = ConversionOptions::default();
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .to_plain_text(page_index, &opts)
             .map_err(|e| JsValue::from_str(&format!("Failed to convert to plain text: {}", e)))
     }
@@ -272,6 +369,8 @@ impl WasmPdfDocument {
     pub fn to_plain_text_all(&mut self) -> Result<String, JsValue> {
         let opts = ConversionOptions::default();
         self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .to_plain_text_all(&opts)
             .map_err(|e| JsValue::from_str(&format!("Failed to convert to plain text: {}", e)))
     }
@@ -284,12 +383,36 @@ impl WasmPdfDocument {
     ///
     /// Returns an array of objects with: char, bbox {x, y, width, height},
     /// font_name, font_size, font_weight, is_italic, color {r, g, b}, etc.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     #[wasm_bindgen(js_name = "extractChars")]
-    pub fn extract_chars(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let chars = self
+    pub fn extract_chars(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
             .inner
-            .extract_chars(page_index)
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+
+        let chars_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_chars_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            inner.extract_chars(page_index)
+        };
+
+        let chars = chars_result
             .map_err(|e| JsValue::from_str(&format!("Failed to extract chars: {}", e)))?;
+
         serde_wasm_bindgen::to_value(&chars)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
@@ -299,12 +422,153 @@ impl WasmPdfDocument {
     /// Returns an array of objects with: text, bbox, font_name, font_size,
     /// font_weight, is_italic, color, etc.
     #[wasm_bindgen(js_name = "extractSpans")]
-    pub fn extract_spans(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let spans = self
+    pub fn extract_spans(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
             .inner
-            .extract_spans(page_index)
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let spans_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_spans_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            inner.extract_spans(page_index)
+        };
+
+        let spans = spans_result
             .map_err(|e| JsValue::from_str(&format!("Failed to extract spans: {}", e)))?;
         serde_wasm_bindgen::to_value(&spans)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract word-level data from a page.
+    ///
+    /// Returns an array of objects with: text, bbox, font_name, font_size,
+    /// font_weight, is_italic, is_bold.
+    #[wasm_bindgen(js_name = "extractWords")]
+    pub fn extract_words(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let words_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_words_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            inner.extract_words(page_index)
+        };
+
+        let words = words_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract words: {}", e)))?;
+        serde_wasm_bindgen::to_value(&words)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract text lines from a page.
+    ///
+    /// Returns an array of objects with: text, bbox, words (array of Word objects).
+    #[wasm_bindgen(js_name = "extractTextLines")]
+    pub fn extract_text_lines(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let lines_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_text_lines_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            inner.extract_text_lines(page_index)
+        };
+
+        let lines = lines_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract lines: {}", e)))?;
+        serde_wasm_bindgen::to_value(&lines)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract tables from a page (v0.3.14).
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
+    #[wasm_bindgen(js_name = "extractTables")]
+    pub fn extract_tables(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let tables_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_tables_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+            )
+        } else {
+            inner.extract_tables(page_index)
+        };
+
+        let tables = tables_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract tables: {}", e)))?;
+
+        // Convert tables to a simplified JSON-friendly format
+        let json_tables: Vec<serde_json::Value> = tables
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "col_count": t.col_count,
+                    "row_count": t.rows.len(),
+                    "bbox": t.bbox.map(|b| serde_json::json!({"x": b.x, "y": b.y, "width": b.width, "height": b.height})),
+                    "has_header": t.has_header,
+                    "rows": t.rows.iter().map(|r| {
+                        serde_json::json!({
+                            "is_header": r.is_header,
+                            "cells": r.cells.iter().map(|c| {
+                                serde_json::json!({
+                                    "text": c.text,
+                                    "bbox": c.bbox.map(|b| serde_json::json!({"x": b.x, "y": b.y, "width": b.width, "height": b.height}))
+                                })
+                            }).collect::<Vec<_>>()
+                        })
+                    }).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&json_tables)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 
@@ -337,7 +601,11 @@ impl WasmPdfDocument {
             max_results: max_results.unwrap_or(0),
             page_range: None,
         };
-        let results = TextSearcher::search(&mut self.inner, pattern, &options)
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let results = TextSearcher::search(&mut inner, pattern, &options)
             .map_err(|e| JsValue::from_str(&format!("Search failed: {}", e)))?;
         serde_wasm_bindgen::to_value(&results)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
@@ -361,7 +629,11 @@ impl WasmPdfDocument {
             max_results: max_results.unwrap_or(0),
             page_range: Some((page_index, page_index)),
         };
-        let results = TextSearcher::search(&mut self.inner, pattern, &options)
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let results = TextSearcher::search(&mut inner, pattern, &options)
             .map_err(|e| JsValue::from_str(&format!("Search failed: {}", e)))?;
         serde_wasm_bindgen::to_value(&results)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
@@ -375,11 +647,32 @@ impl WasmPdfDocument {
     ///
     /// Returns an array of objects with: width, height, color_space,
     /// bits_per_component, bbox (if available). Does NOT return raw image bytes.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     #[wasm_bindgen(js_name = "extractImages")]
-    pub fn extract_images(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let images = self
+    pub fn extract_images(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
             .inner
-            .extract_images(page_index)
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let images_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_images_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+            )
+        } else {
+            inner.extract_images(page_index)
+        };
+
+        let images = images_result
             .map_err(|e| JsValue::from_str(&format!("Failed to extract images: {}", e)))?;
 
         // Serialize image metadata (not raw bytes)
@@ -406,6 +699,8 @@ impl WasmPdfDocument {
                     });
                     obj.insert("bbox".into(), bbox_obj);
                 }
+                obj.insert("rotation".into(), serde_json::Value::from(img.rotation_degrees()));
+                obj.insert("matrix".into(), serde_json::json!(img.matrix()));
                 serde_json::Value::Object(obj)
             })
             .collect();
@@ -426,6 +721,8 @@ impl WasmPdfDocument {
     pub fn get_outline(&mut self) -> Result<JsValue, JsValue> {
         let outline = self
             .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .get_outline()
             .map_err(|e| JsValue::from_str(&format!("Failed to get outline: {}", e)))?;
 
@@ -447,6 +744,8 @@ impl WasmPdfDocument {
     pub fn get_annotations(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
         let annotations = self
             .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .get_annotations(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to get annotations: {}", e)))?;
 
@@ -514,12 +813,32 @@ impl WasmPdfDocument {
     /// Extract vector paths (lines, curves, shapes) from a page.
     ///
     /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     /// @returns Array of path objects with bbox, stroke_color, fill_color, etc.
     #[wasm_bindgen(js_name = "extractPaths")]
-    pub fn extract_paths(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let paths = self
+    pub fn extract_paths(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
             .inner
-            .extract_paths(page_index)
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+
+        let paths_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_paths_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+            )
+        } else {
+            inner.extract_paths(page_index)
+        };
+
+        let paths = paths_result
             .map_err(|e| JsValue::from_str(&format!("Failed to extract paths: {}", e)))?;
 
         let result: Vec<serde_json::Value> = paths
@@ -578,6 +897,281 @@ impl WasmPdfDocument {
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 
+    /// Extract only rectangles from a page (v0.3.14).
+    ///
+    /// Identifies paths that form axis-aligned rectangles.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
+    /// @returns Array of path objects
+    #[wasm_bindgen(js_name = "extractRects")]
+    pub fn extract_rects(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let rects_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_rects(page_index).map(|list| {
+                use crate::layout::SpatialCollectionFiltering;
+                list.filter_by_rect(
+                    &crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+            })
+        } else {
+            inner.extract_rects(page_index)
+        };
+
+        let rects = rects_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract rects: {}", e)))?;
+        serde_wasm_bindgen::to_value(&rects)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract only straight lines from a page (v0.3.14).
+    ///
+    /// Identifies paths that form a single straight line segment.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
+    /// @returns Array of path objects
+    #[wasm_bindgen(js_name = "extractLines")]
+    pub fn extract_lines(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let lines_result = if let Some(r) = region {
+            if r.len() != 4 {
+                return Err(JsValue::from_str("Region must have exactly 4 elements [x, y, w, h]"));
+            }
+            inner.extract_lines(page_index).map(|list| {
+                use crate::layout::SpatialCollectionFiltering;
+                list.filter_by_rect(
+                    &crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+            })
+        } else {
+            inner.extract_lines(page_index)
+        };
+
+        let lines = lines_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract lines: {}", e)))?;
+        serde_wasm_bindgen::to_value(&lines)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+}
+
+/// A focused view of a PDF page region for scoped extraction (v0.3.14).
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmPdfPageRegion {
+    doc: WasmPdfDocument,
+    page_index: usize,
+    region: crate::geometry::Rect,
+}
+
+#[wasm_bindgen]
+impl WasmPdfPageRegion {
+    /// Extract text from this region.
+    #[wasm_bindgen(js_name = "extractText")]
+    pub fn extract_text(&mut self) -> Result<String, JsValue> {
+        self.doc
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .extract_text_in_rect(
+                self.page_index,
+                self.region,
+                crate::layout::RectFilterMode::Intersects,
+            )
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+    }
+
+    /// Extract character-level data from this region.
+    #[wasm_bindgen(js_name = "extractChars")]
+    pub fn extract_chars(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_chars(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract words from this region.
+    #[wasm_bindgen(js_name = "extractWords")]
+    pub fn extract_words(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_words(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract text lines from this region.
+    #[wasm_bindgen(js_name = "extractTextLines")]
+    pub fn extract_text_lines(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_text_lines(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract tables from this region.
+    #[wasm_bindgen(js_name = "extractTables")]
+    pub fn extract_tables(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_tables(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract images from this region.
+    #[wasm_bindgen(js_name = "extractImages")]
+    pub fn extract_images(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_images(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract vector paths from this region.
+    #[wasm_bindgen(js_name = "extractPaths")]
+    pub fn extract_paths(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_paths(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract rectangles from this region.
+    #[wasm_bindgen(js_name = "extractRects")]
+    pub fn extract_rects(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_rects(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract straight lines from this region.
+    #[wasm_bindgen(js_name = "extractLines")]
+    pub fn extract_lines(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_lines(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract text using OCR from this region.
+    #[wasm_bindgen(js_name = "extractTextOcr")]
+    pub fn extract_text_ocr(&mut self, _engine: Option<WasmOcrEngine>) -> Result<String, JsValue> {
+        Err(JsValue::from_str(
+            "OCR is not yet supported in WebAssembly. Please use the Python or Rust APIs for OCR.",
+        ))
+    }
+}
+
+/// OCR configuration for WebAssembly.
+#[wasm_bindgen]
+#[derive(Clone, Default)]
+pub struct WasmOcrConfig {}
+
+#[wasm_bindgen]
+impl WasmOcrConfig {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// OCR engine for WebAssembly.
+#[wasm_bindgen]
+pub struct WasmOcrEngine {}
+
+#[wasm_bindgen]
+impl WasmOcrEngine {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        _det_model_path: &str,
+        _rec_model_path: &str,
+        _dict_path: &str,
+        _config: Option<WasmOcrConfig>,
+    ) -> Result<WasmOcrEngine, JsValue> {
+        Err(JsValue::from_str(
+            "OCR is not yet supported in WebAssembly. Please use the Python or Rust APIs for OCR.",
+        ))
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPdfDocument {
+    // =================================Group 6b: OCR========================================
+
+    /// Extract text using OCR (optical character recognition).
+    ///
+    /// NOTE: OCR is not yet supported in the WebAssembly build due to missing
+    /// ONNX Runtime support for the web backend in the current implementation.
+    #[wasm_bindgen(js_name = "extractTextOcr")]
+    pub fn extract_text_ocr(
+        &mut self,
+        _page_index: usize,
+        _engine: Option<WasmOcrEngine>,
+    ) -> Result<String, JsValue> {
+        Err(JsValue::from_str(
+            "OCR is not yet supported in WebAssembly. Please use the Python or Rust APIs for OCR.",
+        ))
+    }
+
     // ========================================================================
     // Group 6c: Form Fields
     // ========================================================================
@@ -598,7 +1192,11 @@ impl WasmPdfDocument {
     pub fn get_form_fields(&mut self) -> Result<JsValue, JsValue> {
         use crate::extractors::forms::{field_flags, FieldType, FieldValue, FormExtractor};
 
-        let fields = FormExtractor::extract_fields(&mut self.inner)
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let fields = FormExtractor::extract_fields(&mut inner)
             .map_err(|e| JsValue::from_str(&format!("Failed to extract form fields: {}", e)))?;
 
         let result: Vec<serde_json::Value> = fields
@@ -681,7 +1279,11 @@ impl WasmPdfDocument {
     pub fn has_xfa(&mut self) -> Result<bool, JsValue> {
         use crate::xfa::XfaExtractor;
 
-        XfaExtractor::has_xfa(&mut self.inner)
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        XfaExtractor::has_xfa(&mut inner)
             .map_err(|e| JsValue::from_str(&format!("Failed to check XFA: {}", e)))
     }
 
@@ -693,7 +1295,10 @@ impl WasmPdfDocument {
     pub fn export_form_data(&mut self, format: Option<String>) -> Result<Vec<u8>, JsValue> {
         let fmt = format.as_deref().unwrap_or("fdf");
 
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
 
         // Write to a temporary in-memory buffer via a temp file path
         let tmp_path = "/tmp/pdf_oxide_form_export_wasm.tmp";
@@ -728,7 +1333,10 @@ impl WasmPdfDocument {
     /// @returns The field value: string for text, boolean for checkbox, null if not found
     #[wasm_bindgen(js_name = "getFormFieldValue")]
     pub fn get_form_field_value(&mut self, name: &str) -> Result<JsValue, JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         let value = editor
             .get_form_field_value(name)
             .map_err(|e| JsValue::from_str(&format!("Failed to get field value: {}", e)))?;
@@ -745,7 +1353,10 @@ impl WasmPdfDocument {
     /// @param value - New value: string for text fields, boolean for checkboxes
     #[wasm_bindgen(js_name = "setFormFieldValue")]
     pub fn set_form_field_value(&mut self, name: &str, value: JsValue) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         let field_value = js_to_form_field_value(&value)?;
         editor
             .set_form_field_value(name, field_value)
@@ -761,8 +1372,11 @@ impl WasmPdfDocument {
     /// Returns an array of objects with: width, height, data (Uint8Array of PNG bytes), format ("png").
     #[wasm_bindgen(js_name = "extractImageBytes")]
     pub fn extract_image_bytes(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let images = self
+        let mut inner = self
             .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let images = inner
             .extract_images(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to extract images: {}", e)))?;
 
@@ -792,7 +1406,10 @@ impl WasmPdfDocument {
     /// After flattening, form field values become static text and are no longer editable.
     #[wasm_bindgen(js_name = "flattenForms")]
     pub fn flatten_forms(&mut self) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .flatten_forms()
             .map_err(|e| JsValue::from_str(&format!("Failed to flatten forms: {}", e)))
@@ -803,7 +1420,10 @@ impl WasmPdfDocument {
     /// @param page_index - Zero-based page number
     #[wasm_bindgen(js_name = "flattenFormsOnPage")]
     pub fn flatten_forms_on_page(&mut self, page_index: usize) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .flatten_forms_on_page(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to flatten forms on page: {}", e)))
@@ -819,7 +1439,10 @@ impl WasmPdfDocument {
     /// @returns Number of pages merged
     #[wasm_bindgen(js_name = "mergeFrom")]
     pub fn merge_from(&mut self, data: &[u8]) -> Result<usize, JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .merge_from_bytes(data)
             .map_err(|e| JsValue::from_str(&format!("Failed to merge PDF: {}", e)))
@@ -835,7 +1458,10 @@ impl WasmPdfDocument {
     /// @param data - File contents as a Uint8Array
     #[wasm_bindgen(js_name = "embedFile")]
     pub fn embed_file(&mut self, name: &str, data: &[u8]) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .embed_file(name, data.to_vec())
             .map_err(|e| JsValue::from_str(&format!("Failed to embed file: {}", e)))
@@ -852,7 +1478,11 @@ impl WasmPdfDocument {
     pub fn page_labels(&mut self) -> Result<JsValue, JsValue> {
         use crate::extractors::page_labels::PageLabelExtractor;
 
-        let labels = PageLabelExtractor::extract(&mut self.inner)
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let labels = PageLabelExtractor::extract(&mut inner)
             .map_err(|e| JsValue::from_str(&format!("Failed to get page labels: {}", e)))?;
 
         let result: Vec<serde_json::Value> = labels
@@ -885,7 +1515,11 @@ impl WasmPdfDocument {
     pub fn xmp_metadata(&mut self) -> Result<JsValue, JsValue> {
         use crate::extractors::xmp::XmpExtractor;
 
-        let metadata = XmpExtractor::extract(&mut self.inner)
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        let metadata = XmpExtractor::extract(&mut inner)
             .map_err(|e| JsValue::from_str(&format!("Failed to get XMP metadata: {}", e)))?;
 
         match metadata {
@@ -952,7 +1586,10 @@ impl WasmPdfDocument {
     /// Set the document title.
     #[wasm_bindgen(js_name = "setTitle")]
     pub fn set_title(&mut self, title: &str) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor.set_title(title);
         Ok(())
     }
@@ -960,7 +1597,10 @@ impl WasmPdfDocument {
     /// Set the document author.
     #[wasm_bindgen(js_name = "setAuthor")]
     pub fn set_author(&mut self, author: &str) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor.set_author(author);
         Ok(())
     }
@@ -968,7 +1608,10 @@ impl WasmPdfDocument {
     /// Set the document subject.
     #[wasm_bindgen(js_name = "setSubject")]
     pub fn set_subject(&mut self, subject: &str) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor.set_subject(subject);
         Ok(())
     }
@@ -976,7 +1619,10 @@ impl WasmPdfDocument {
     /// Set the document keywords.
     #[wasm_bindgen(js_name = "setKeywords")]
     pub fn set_keywords(&mut self, keywords: &str) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor.set_keywords(keywords);
         Ok(())
     }
@@ -988,7 +1634,10 @@ impl WasmPdfDocument {
     /// Get the rotation of a page in degrees (0, 90, 180, 270).
     #[wasm_bindgen(js_name = "pageRotation")]
     pub fn page_rotation(&mut self, page_index: usize) -> Result<i32, JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .get_page_rotation(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to get rotation: {}", e)))
@@ -997,7 +1646,10 @@ impl WasmPdfDocument {
     /// Set the rotation of a page (0, 90, 180, or 270 degrees).
     #[wasm_bindgen(js_name = "setPageRotation")]
     pub fn set_page_rotation(&mut self, page_index: usize, degrees: i32) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .set_page_rotation(page_index, degrees)
             .map_err(|e| JsValue::from_str(&format!("Failed to set rotation: {}", e)))
@@ -1006,7 +1658,10 @@ impl WasmPdfDocument {
     /// Rotate a page by the given degrees (adds to current rotation).
     #[wasm_bindgen(js_name = "rotatePage")]
     pub fn rotate_page(&mut self, page_index: usize, degrees: i32) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .rotate_page_by(page_index, degrees)
             .map_err(|e| JsValue::from_str(&format!("Failed to rotate page: {}", e)))
@@ -1015,7 +1670,10 @@ impl WasmPdfDocument {
     /// Rotate all pages by the given degrees.
     #[wasm_bindgen(js_name = "rotateAllPages")]
     pub fn rotate_all_pages(&mut self, degrees: i32) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .rotate_all_pages(degrees)
             .map_err(|e| JsValue::from_str(&format!("Failed to rotate all pages: {}", e)))
@@ -1024,7 +1682,10 @@ impl WasmPdfDocument {
     /// Get the MediaBox of a page as [llx, lly, urx, ury].
     #[wasm_bindgen(js_name = "pageMediaBox")]
     pub fn page_media_box(&mut self, page_index: usize) -> Result<Vec<f32>, JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         let mbox = editor
             .get_page_media_box(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to get media box: {}", e)))?;
@@ -1041,7 +1702,10 @@ impl WasmPdfDocument {
         urx: f32,
         ury: f32,
     ) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .set_page_media_box(page_index, [llx, lly, urx, ury])
             .map_err(|e| JsValue::from_str(&format!("Failed to set media box: {}", e)))
@@ -1050,7 +1714,10 @@ impl WasmPdfDocument {
     /// Get the CropBox of a page as [llx, lly, urx, ury], or null if not set.
     #[wasm_bindgen(js_name = "pageCropBox")]
     pub fn page_crop_box(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         let cbox = editor
             .get_page_crop_box(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to get crop box: {}", e)))?;
@@ -1071,7 +1738,10 @@ impl WasmPdfDocument {
         urx: f32,
         ury: f32,
     ) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .set_page_crop_box(page_index, [llx, lly, urx, ury])
             .map_err(|e| JsValue::from_str(&format!("Failed to set crop box: {}", e)))
@@ -1086,7 +1756,10 @@ impl WasmPdfDocument {
         top: f32,
         bottom: f32,
     ) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .crop_margins(left, right, top, bottom)
             .map_err(|e| JsValue::from_str(&format!("Failed to crop margins: {}", e)))
@@ -1106,7 +1779,10 @@ impl WasmPdfDocument {
         urx: f32,
         ury: f32,
     ) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .erase_region(page_index, [llx, lly, urx, ury])
             .map_err(|e| JsValue::from_str(&format!("Failed to erase region: {}", e)))
@@ -1125,7 +1801,10 @@ impl WasmPdfDocument {
             .chunks_exact(4)
             .map(|c| [c[0], c[1], c[2], c[3]])
             .collect();
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .erase_regions(page_index, &rect_arrays)
             .map_err(|e| JsValue::from_str(&format!("Failed to erase regions: {}", e)))
@@ -1134,7 +1813,10 @@ impl WasmPdfDocument {
     /// Clear all pending erase operations for a page.
     #[wasm_bindgen(js_name = "clearEraseRegions")]
     pub fn clear_erase_regions(&mut self, page_index: usize) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor.clear_erase_regions(page_index);
         Ok(())
     }
@@ -1146,7 +1828,10 @@ impl WasmPdfDocument {
     /// Flatten annotations on a page into the page content.
     #[wasm_bindgen(js_name = "flattenPageAnnotations")]
     pub fn flatten_page_annotations(&mut self, page_index: usize) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .flatten_page_annotations(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to flatten annotations: {}", e)))
@@ -1155,7 +1840,10 @@ impl WasmPdfDocument {
     /// Flatten all annotations in the document into page content.
     #[wasm_bindgen(js_name = "flattenAllAnnotations")]
     pub fn flatten_all_annotations(&mut self) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .flatten_all_annotations()
             .map_err(|e| JsValue::from_str(&format!("Failed to flatten annotations: {}", e)))
@@ -1168,7 +1856,10 @@ impl WasmPdfDocument {
     /// Apply redactions on a page (removes redacted content permanently).
     #[wasm_bindgen(js_name = "applyPageRedactions")]
     pub fn apply_page_redactions(&mut self, page_index: usize) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .apply_page_redactions(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to apply redactions: {}", e)))
@@ -1177,7 +1868,10 @@ impl WasmPdfDocument {
     /// Apply all redactions in the document.
     #[wasm_bindgen(js_name = "applyAllRedactions")]
     pub fn apply_all_redactions(&mut self) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .apply_all_redactions()
             .map_err(|e| JsValue::from_str(&format!("Failed to apply redactions: {}", e)))
@@ -1192,7 +1886,10 @@ impl WasmPdfDocument {
     /// Returns an array of {name, bounds: [x, y, width, height], matrix: [a, b, c, d, e, f]}.
     #[wasm_bindgen(js_name = "pageImages")]
     pub fn page_images(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         let images = editor
             .get_page_images(page_index)
             .map_err(|e| JsValue::from_str(&format!("Failed to get page images: {}", e)))?;
@@ -1209,7 +1906,10 @@ impl WasmPdfDocument {
         x: f32,
         y: f32,
     ) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .reposition_image(page_index, name, x, y)
             .map_err(|e| JsValue::from_str(&format!("Failed to reposition image: {}", e)))
@@ -1224,7 +1924,10 @@ impl WasmPdfDocument {
         width: f32,
         height: f32,
     ) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .resize_image(page_index, name, width, height)
             .map_err(|e| JsValue::from_str(&format!("Failed to resize image: {}", e)))
@@ -1241,7 +1944,10 @@ impl WasmPdfDocument {
         width: f32,
         height: f32,
     ) -> Result<(), JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .set_image_bounds(page_index, name, x, y, width, height)
             .map_err(|e| JsValue::from_str(&format!("Failed to set image bounds: {}", e)))
@@ -1256,20 +1962,16 @@ impl WasmPdfDocument {
     /// @returns Uint8Array containing the modified PDF
     #[wasm_bindgen(js_name = "saveToBytes")]
     pub fn save_to_bytes(&mut self) -> Result<Vec<u8>, JsValue> {
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .save_to_bytes()
             .map_err(|e| JsValue::from_str(&format!("Failed to save PDF: {}", e)))
     }
 
     /// Save with encryption and return the resulting PDF as bytes.
-    ///
-    /// @param user_password - Password required to open the document
-    /// @param owner_password - Password for full access (defaults to user_password)
-    /// @param allow_print - Allow printing (default: true)
-    /// @param allow_copy - Allow copying text (default: true)
-    /// @param allow_modify - Allow modifying (default: true)
-    /// @param allow_annotate - Allow annotations (default: true)
     #[wasm_bindgen(js_name = "saveEncryptedToBytes")]
     pub fn save_encrypted_to_bytes(
         &mut self,
@@ -1298,7 +2000,10 @@ impl WasmPdfDocument {
             .with_permissions(permissions);
 
         let options = SaveOptions::with_encryption(config);
-        let editor = self.ensure_editor()?;
+        let editor_arc = self.ensure_editor()?;
+        let mut editor = editor_arc
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
         editor
             .save_to_bytes_with_options(options)
             .map_err(|e| JsValue::from_str(&format!("Failed to save encrypted PDF: {}", e)))

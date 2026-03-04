@@ -57,7 +57,16 @@ fn dispatch(
     };
 
     let result = match cmd {
-        Command::Text { ref file } => commands::text::run(file, pages, output, password, json),
+        Command::Text {
+            ref file,
+            ref format,
+            ref area,
+        } => commands::text::run(file, format, area.as_deref(), pages, output, password, json),
+        Command::Paths {
+            ref file,
+            ref format,
+            ref area,
+        } => commands::paths::run(file, format, area.as_deref(), pages, output, password, json),
         Command::Markdown { ref file } => {
             commands::markdown::run(file, pages, output, password, json)
         },
@@ -77,7 +86,9 @@ fn dispatch(
             ref pattern,
             ignore_case,
         } => commands::search::run(file, pattern, ignore_case, pages, password, json),
-        Command::Images { ref file } => commands::images::run(file, pages, output, password, json),
+        Command::Images { ref file, ref area } => {
+            commands::images::run(file, area.as_deref(), pages, output, password, json)
+        },
         Command::Rotate { ref file, degrees } => {
             commands::rotate::run(file, degrees, pages, output, password)
         },
@@ -136,7 +147,23 @@ fn dispatch(
             ref file,
             ref fill,
             ref export,
-        } => commands::forms::run(file, fill.as_deref(), export.as_deref(), output, password, json),
+            ref area,
+        } => commands::forms::run(
+            file,
+            fill.as_deref(),
+            export.as_deref(),
+            area.as_deref(),
+            pages,
+            output,
+            password,
+            json,
+        ),
+        Command::Render {
+            ref file,
+            dpi,
+            ref format,
+            quality,
+        } => commands::render::run(file, dpi, format, quality, pages, output, password),
     };
 
     if let Some(start) = start {
@@ -162,7 +189,7 @@ fn run_piped_stdin() -> pdf_oxide::Result<()> {
             ));
         }
         let file = std::path::PathBuf::from(&path);
-        commands::text::run(&file, None, None, None, false)
+        commands::text::run(&file, "plain", None, None, None, None, false)
     } else {
         Err(pdf_oxide::Error::InvalidOperation("No input received on stdin".to_string()))
     }

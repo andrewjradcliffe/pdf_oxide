@@ -241,7 +241,7 @@ impl XmpExtractor {
         metadata.raw_xml = Some(xml.to_string());
 
         let mut reader = Reader::from_str(xmp_content);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         // Stack to track element hierarchy
         let mut element_stack: Vec<String> = Vec::new();
@@ -256,7 +256,7 @@ impl XmpExtractor {
                     // Empty elements don't have text content
                 },
                 Ok(Event::Text(e)) => {
-                    let text = e.unescape().unwrap_or_default().trim().to_string();
+                    let text = e.xml_content().unwrap_or_default().trim().to_string();
                     if text.is_empty() {
                         continue;
                     }

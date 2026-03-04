@@ -1,17 +1,29 @@
 use pdf_oxide::editor::form_fields::FormFieldValue;
 use pdf_oxide::editor::{DocumentEditor, EditableDocument, SaveOptions};
+use pdf_oxide::geometry::Rect;
 use std::path::Path;
 
 pub fn run(
     file: &Path,
     fill: Option<&str>,
     export: Option<&str>,
+    area: Option<&str>,
+    pages: Option<&str>,
     output: Option<&Path>,
     password: Option<&str>,
     json: bool,
 ) -> pdf_oxide::Result<()> {
     let _ = password;
     let mut editor = DocumentEditor::open(file)?;
+
+    let region = if let Some(area_str) = area {
+        Some(parse_area(area_str)?)
+    } else {
+        None
+    };
+
+    let page_count = editor.source_mut().page_count()?;
+    let page_indices = super::resolve_pages(pages, page_count)?;
 
     // Export mode
     if let Some(format) = export {
@@ -63,13 +75,27 @@ pub fn run(
     }
 
     // List mode (default)
-    let fields = editor.get_form_fields()?;
+    let mut fields = editor.get_form_fields()?;
+
+    // Filter by pages
+    fields.retain(|f| page_indices.contains(&f.page_index()));
+
+    // Filter by area
+    if let Some(r) = region {
+        fields.retain(|f| {
+            if let Some(bounds) = f.bounds() {
+                bounds.intersects(&r)
+            } else {
+                false
+            }
+        });
+    }
 
     if fields.is_empty() {
         if json {
             super::write_output("[]", None)?;
         } else {
-            eprintln!("No form fields found in {}", file.display());
+            eprintln!("No matching form fields found in {}", file.display());
         }
         return Ok(());
     }
@@ -89,7 +115,7 @@ pub fn run(
         let out = serde_json::to_string_pretty(&json_fields).unwrap();
         super::write_output(&out, None)?;
     } else {
-        eprintln!("Found {} form field(s):", fields.len());
+        eprintln!("Found {} matching form field(s):", fields.len());
         for f in &fields {
             let ftype = f
                 .field_type()
@@ -126,4 +152,28 @@ fn parse_fill_pairs(s: &str) -> pdf_oxide::Result<Vec<(String, String)>> {
         }
     }
     Ok(pairs)
+}
+
+fn parse_area(s: &str) -> pdf_oxide::Result<Rect> {
+    let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
+    if parts.len() != 4 {
+        return Err(pdf_oxide::Error::InvalidOperation(
+            "Area must be provided as x,y,width,height".to_string(),
+        ));
+    }
+
+    let x = parts[0].parse::<f32>().map_err(|_| {
+        pdf_oxide::Error::InvalidOperation(format!("Invalid x coordinate: {}", parts[0]))
+    })?;
+    let y = parts[1].parse::<f32>().map_err(|_| {
+        pdf_oxide::Error::InvalidOperation(format!("Invalid y coordinate: {}", parts[1]))
+    })?;
+    let w = parts[2]
+        .parse::<f32>()
+        .map_err(|_| pdf_oxide::Error::InvalidOperation(format!("Invalid width: {}", parts[2])))?;
+    let h = parts[3]
+        .parse::<f32>()
+        .map_err(|_| pdf_oxide::Error::InvalidOperation(format!("Invalid height: {}", parts[3])))?;
+
+    Ok(Rect::new(x, y, w, h))
 }

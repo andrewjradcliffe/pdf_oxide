@@ -13,6 +13,8 @@ pub mod info;
 pub mod markdown;
 pub mod merge;
 pub mod metadata;
+pub mod paths;
+pub mod render;
 pub mod reorder;
 pub mod rotate;
 pub mod search;
