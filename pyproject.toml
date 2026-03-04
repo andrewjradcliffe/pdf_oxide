@@ -46,6 +46,12 @@ Documentation = "https://pdf.oxide.fyi/docs/getting-started/python"
 Repository = "https://github.com/yfedoseev/pdf_oxide"
 "Bug Tracker" = "https://github.com/yfedoseev/pdf_oxide/issues"
 
+[project.optional-dependencies]
+ocr = [
+    # OCR requires ONNX Runtime and heavy ML dependencies
+    "onnxruntime>=1.20.1",
+]
+
 [dependency-groups]
 dev = [
     # Linter and formatter (fast, all-in-one tool written in Rust)

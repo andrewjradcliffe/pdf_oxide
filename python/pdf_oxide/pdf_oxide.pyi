@@ -114,6 +114,29 @@ class PdfDocument:
         """
         ...
 
+    def extract_text_ocr(self, page: int, engine: Optional[OcrEngine] = None) -> str:
+        """
+        Extract text from a page using OCR (optical character recognition).
+
+        Falls back to native text extraction when the page has digital text.
+        Requires the `ocr` feature to be enabled at build time.
+
+        Args:
+            page: Page index (0-based)
+            engine: OCR engine instance. Required for scanned pages.
+
+        Returns:
+            Extracted text from the page
+
+        Raises:
+            RuntimeError: If text extraction fails
+
+        Example:
+            >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt")
+            >>> text = doc.extract_text_ocr(0, engine)
+        """
+        ...
+
     def has_structure_tree(self) -> bool:
         """
         Check if document has a structure tree (Tagged PDF).
@@ -2397,6 +2420,62 @@ class OfficeConverter:
         Example:
             >>> pdf = OfficeConverter.convert("document.docx")
             >>> pdf.save("document.pdf")
+        """
+        ...
+
+# ============================================================================
+# OCR (optional, requires ocr feature)
+# ============================================================================
+
+class OcrConfig:
+    """
+    OCR configuration.
+
+    Args:
+        use_v5: Use PaddleOCR v5 models (default: False)
+        det_threshold: Detection confidence threshold (default: 0.3)
+        box_threshold: Box confidence threshold (default: 0.5)
+        rec_threshold: Recognition confidence threshold (default: 0.5)
+        num_threads: Number of threads for ONNX Runtime (default: 0 = auto)
+        max_candidates: Maximum number of candidates for recognition (default: 1)
+    """
+
+    def __init__(
+        self,
+        use_v5: bool = False,
+        det_threshold: float = 0.3,
+        box_threshold: float = 0.5,
+        rec_threshold: float = 0.5,
+        num_threads: int = 0,
+        max_candidates: int = 1,
+    ) -> None: ...
+
+class OcrEngine:
+    """
+    OCR engine for extracting text from scanned PDF pages.
+
+    Requires the `ocr` feature to be enabled at build time.
+
+    Example:
+        >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt")
+        >>> text = doc.extract_text_ocr(0, engine)
+    """
+
+    def __init__(
+        self,
+        det_model_path: str,
+        rec_model_path: str,
+        dict_path: str,
+        config: Optional[OcrConfig] = None,
+    ) -> None:
+        """
+        Create a new OCR engine.
+
+        Args:
+            det_model_path: Path to the text detection ONNX model
+            rec_model_path: Path to the text recognition ONNX model
+            dict_path: Path to the character dictionary file
+            config: Optional OCR configuration
         """
         ...
 

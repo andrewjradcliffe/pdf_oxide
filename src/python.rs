@@ -21,6 +21,7 @@
 
 use pyo3::exceptions::{PyIOError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
 
 use crate::converters::ConversionOptions as RustConversionOptions;
 use crate::document::PdfDocument as RustPdfDocument;
@@ -217,7 +218,6 @@ impl PyPdfDocument {
     ///     >>> image_bytes = doc.render_page(0, dpi=300)
     ///     >>> with open("page0.png", "wb") as f:
     ///     ...     f.write(image_bytes)
-    #[cfg(feature = "rendering")]
     #[pyo3(signature = (page, dpi=None, format=None))]
     fn render_page(
         &mut self,
@@ -225,19 +225,29 @@ impl PyPdfDocument {
         dpi: Option<u32>,
         format: Option<&str>,
     ) -> PyResult<Vec<u8>> {
-        let mut options = crate::rendering::RenderOptions::with_dpi(dpi.unwrap_or(72));
-        if let Some(fmt) = format {
-            match fmt.to_lowercase().as_str() {
-                "jpeg" | "jpg" => {
-                    options = options.as_jpeg(85);
-                },
-                _ => {}, // Default is PNG
+        #[cfg(feature = "rendering")]
+        {
+            let mut options = crate::rendering::RenderOptions::with_dpi(dpi.unwrap_or(72));
+            if let Some(fmt) = format {
+                match fmt.to_lowercase().as_str() {
+                    "jpeg" | "jpg" => {
+                        options = options.as_jpeg(85);
+                    },
+                    _ => {}, // Default is PNG
+                }
             }
-        }
 
-        crate::rendering::render_page(&mut self.inner, page, &options)
-            .map(|img| img.data)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to render page: {}", e)))
+            crate::rendering::render_page(&mut self.inner, page, &options)
+                .map(|img| img.data)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to render page: {}", e)))
+        }
+        #[cfg(not(feature = "rendering"))]
+        {
+            let _ = page;
+            let _ = dpi;
+            let _ = format;
+            Err(PyRuntimeError::new_err("Rendering feature not enabled. Please build with 'rendering' feature."))
+        }
     }
 
     /// Extract individual characters from a page.
@@ -2123,14 +2133,27 @@ impl PyPdfDocument {
     /// Example:
     ///     >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt")
     ///     >>> text = doc.extract_text_ocr(0, engine)
-    #[cfg(feature = "ocr")]
     #[pyo3(signature = (page, engine=None))]
-    fn extract_text_ocr(&mut self, page: usize, engine: Option<&PyOcrEngine>) -> PyResult<String> {
-        let ocr_engine = engine.map(|e| &e.inner);
-        let options = crate::ocr::OcrExtractOptions::default();
-        self.inner
-            .extract_text_with_ocr(page, ocr_engine, options)
-            .map_err(|e| PyRuntimeError::new_err(format!("OCR extraction failed: {}", e)))
+    fn extract_text_ocr(&mut self, _py: Python<'_>, page: usize, engine: Option<Bound<'_, PyAny>>) -> PyResult<String> {
+        #[cfg(feature = "ocr")]
+        {
+            let ocr_engine = if let Some(eng) = engine {
+                Some(eng.extract::<&PyOcrEngine>()?)
+            } else {
+                None
+            };
+            let engine_inner = ocr_engine.map(|e| &e.inner);
+            let options = crate::ocr::OcrExtractOptions::default();
+            self.inner
+                .extract_text_with_ocr(page, engine_inner, options)
+                .map_err(|e| PyRuntimeError::new_err(format!("OCR extraction failed: {}", e)))
+        }
+        #[cfg(not(feature = "ocr"))]
+        {
+            let _ = engine;
+            let _ = page;
+            Err(PyRuntimeError::new_err("OCR feature not enabled. Please install with 'pip install pdf_oxide[ocr]' or build with --features ocr"))
+        }
     }
 
     // ========================================================================
@@ -2928,6 +2951,43 @@ use crate::converters::office::OfficeConverter as RustOfficeConverter;
 #[cfg(feature = "office")]
 #[pyclass(name = "OfficeConverter")]
 pub struct PyOfficeConverter;
+
+#[cfg(not(feature = "office"))]
+#[pyclass(name = "OfficeConverter")]
+pub struct PyOfficeConverter;
+
+#[cfg(not(feature = "office"))]
+#[pymethods]
+impl PyOfficeConverter {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Err(PyRuntimeError::new_err("Office feature not enabled. Please build with 'office' feature."))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn convert(_args: &Bound<'_, PyTuple>, _kwargs: Option<Bound<'_, PyDict>>) -> PyResult<PyObject> {
+        Err(PyRuntimeError::new_err("Office feature not enabled. Please build with 'office' feature."))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn from_docx(_args: &Bound<'_, PyTuple>, _kwargs: Option<Bound<'_, PyDict>>) -> PyResult<PyObject> {
+        Err(PyRuntimeError::new_err("Office feature not enabled. Please build with 'office' feature."))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn from_xlsx(_args: &Bound<'_, PyTuple>, _kwargs: Option<Bound<'_, PyDict>>) -> PyResult<PyObject> {
+        Err(PyRuntimeError::new_err("Office feature not enabled. Please build with 'office' feature."))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn from_pptx(_args: &Bound<'_, PyTuple>, _kwargs: Option<Bound<'_, PyDict>>) -> PyResult<PyObject> {
+        Err(PyRuntimeError::new_err("Office feature not enabled. Please build with 'office' feature."))
+    }
+}
 
 #[cfg(feature = "office")]
 #[pymethods]
@@ -4239,6 +4299,20 @@ pub struct PyOcrEngine {
     inner: crate::ocr::OcrEngine,
 }
 
+#[cfg(not(feature = "ocr"))]
+#[pyclass(name = "OcrEngine", unsendable)]
+pub struct PyOcrEngine {}
+
+#[cfg(not(feature = "ocr"))]
+#[pymethods]
+impl PyOcrEngine {
+    #[new]
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<Bound<'_, PyDict>>) -> PyResult<Self> {
+        Err(PyRuntimeError::new_err("OCR feature not enabled. Please install with 'pip install pdf_oxide[ocr]' or build with --features ocr"))
+    }
+}
+
 #[cfg(feature = "ocr")]
 #[pymethods]
 impl PyOcrEngine {
@@ -4291,6 +4365,21 @@ impl PyOcrEngine {
 #[derive(Clone)]
 pub struct PyOcrConfig {
     inner: crate::ocr::OcrConfig,
+}
+
+#[cfg(not(feature = "ocr"))]
+#[pyclass(name = "OcrConfig")]
+#[derive(Clone)]
+pub struct PyOcrConfig {}
+
+#[cfg(not(feature = "ocr"))]
+#[pymethods]
+impl PyOcrConfig {
+    #[new]
+    #[pyo3(signature = (**_kwargs))]
+    fn new(_kwargs: Option<Bound<'_, PyDict>>) -> PyResult<Self> {
+        Err(PyRuntimeError::new_err("OCR feature not enabled. Please install with 'pip install pdf_oxide[ocr]' or build with --features ocr"))
+    }
 }
 
 #[cfg(feature = "ocr")]
@@ -5038,11 +5127,8 @@ fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFormField>()?;
 
     // OCR types (optional, requires ocr feature)
-    #[cfg(feature = "ocr")]
-    {
-        m.add_class::<PyOcrEngine>()?;
-        m.add_class::<PyOcrConfig>()?;
-    }
+    m.add_class::<PyOcrEngine>()?;
+    m.add_class::<PyOcrConfig>()?;
 
     // Advanced graphics
     m.add_class::<PyColor>()?;
@@ -5055,7 +5141,6 @@ fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPatternPresets>()?;
 
     // Office conversion (optional, requires office feature)
-    #[cfg(feature = "office")]
     m.add_class::<PyOfficeConverter>()?;
 
     m.add("VERSION", env!("CARGO_PKG_VERSION"))?;
