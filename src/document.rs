@@ -1787,9 +1787,9 @@ impl PdfDocument {
     /// MediaBox defines the physical boundaries of the page in user space units.
     pub fn get_page_media_box(&mut self, page_index: usize) -> Result<(f32, f32, f32, f32)> {
         let page = self.get_page(page_index)?;
-        let page_dict = page.as_dict().ok_or_else(|| {
-            Error::InvalidPdf("Page is not a dictionary".to_string())
-        })?;
+        let page_dict = page
+            .as_dict()
+            .ok_or_else(|| Error::InvalidPdf("Page is not a dictionary".to_string()))?;
 
         let media_box = page_dict
             .get("MediaBox")
@@ -1797,9 +1797,7 @@ impl PdfDocument {
             .ok_or_else(|| Error::InvalidPdf("MediaBox not found or not an array".to_string()))?;
 
         if media_box.len() < 4 {
-            return Err(Error::InvalidPdf(
-                "MediaBox must have at least 4 elements".to_string(),
-            ));
+            return Err(Error::InvalidPdf("MediaBox must have at least 4 elements".to_string()));
         }
 
         fn to_f32(obj: &Object) -> f32 {
@@ -5002,7 +5000,7 @@ impl PdfDocument {
     /// }
     /// ```
     pub fn extract_words(&mut self, page_index: usize) -> Result<Vec<crate::layout::Word>> {
-        use crate::layout::{clustering, DocumentProperties, AdaptiveLayoutParams, Word};
+        use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, Word};
 
         let chars = self.extract_chars(page_index)?;
         if chars.is_empty() {
@@ -5010,11 +5008,14 @@ impl PdfDocument {
         }
 
         // Compute adaptive parameters
-        let media_box = self.get_page_media_box(page_index).unwrap_or((0.0, 0.0, 612.0, 792.0));
-        let page_bbox = crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
+        let media_box = self
+            .get_page_media_box(page_index)
+            .unwrap_or((0.0, 0.0, 612.0, 792.0));
+        let page_bbox =
+            crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
 
-        let props = DocumentProperties::analyze(&chars, page_bbox)
-            .map_err(Error::LayoutAnalysis)?;
+        let props =
+            DocumentProperties::analyze(&chars, page_bbox).map_err(Error::LayoutAnalysis)?;
         let params = AdaptiveLayoutParams::from_properties(&props);
 
         let clusters = clustering::cluster_chars_into_words(&chars, params.word_gap_threshold);
@@ -5055,24 +5056,31 @@ impl PdfDocument {
     ///     println!("Line: {} at {:?}", line.text, line.bbox);
     /// }
     /// ```
-    pub fn extract_text_lines(&mut self, page_index: usize) -> Result<Vec<crate::layout::TextLine>> {
-        use crate::layout::{clustering, DocumentProperties, AdaptiveLayoutParams, TextLine, Word};
+    pub fn extract_text_lines(
+        &mut self,
+        page_index: usize,
+    ) -> Result<Vec<crate::layout::TextLine>> {
+        use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, TextLine, Word};
 
         let chars = self.extract_chars(page_index)?;
         if chars.is_empty() {
             return Ok(Vec::new());
         }
 
-        let media_box = self.get_page_media_box(page_index).unwrap_or((0.0, 0.0, 612.0, 792.0));
-        let page_bbox = crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
+        let media_box = self
+            .get_page_media_box(page_index)
+            .unwrap_or((0.0, 0.0, 612.0, 792.0));
+        let page_bbox =
+            crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
 
-        let props = DocumentProperties::analyze(&chars, page_bbox)
-            .map_err(Error::LayoutAnalysis)?;
+        let props =
+            DocumentProperties::analyze(&chars, page_bbox).map_err(Error::LayoutAnalysis)?;
         let params = AdaptiveLayoutParams::from_properties(&props);
 
         // 1. Cluster chars -> words
         let word_clusters = clustering::cluster_chars_into_words(&chars, params.word_gap_threshold);
-        let words: Vec<_> = word_clusters.into_iter()
+        let words: Vec<_> = word_clusters
+            .into_iter()
             .map(|indices| {
                 let cluster_chars: Vec<_> = indices.iter().map(|&i| chars[i].clone()).collect();
                 Word::from_chars(cluster_chars)
@@ -6617,8 +6625,11 @@ impl PdfDocument {
             spans
         };
 
-        let tables =
-            crate::structure::spatial_table_detector::detect_tables_with_lines(input_spans, &lines, &config);
+        let tables = crate::structure::spatial_table_detector::detect_tables_with_lines(
+            input_spans,
+            &lines,
+            &config,
+        );
 
         if !tables.is_empty() {
             log::debug!(

@@ -3,9 +3,9 @@
 //! This module provides utilities for filtering text and geometric elements
 //! based on their rectangular regions.
 
-use crate::geometry::Rect;
-use crate::layout::{TextChar, Word, TextLine, TextSpan};
 use crate::elements::PathContent;
+use crate::geometry::Rect;
+use crate::layout::{TextChar, TextLine, TextSpan, Word};
 
 /// Filter mode for bounded extraction.
 ///
@@ -73,23 +73,33 @@ pub trait LayoutObjectSpatial {
 
 // Implement for core types
 impl LayoutObjectSpatial for TextChar {
-    fn bbox(&self) -> Rect { self.bbox }
+    fn bbox(&self) -> Rect {
+        self.bbox
+    }
 }
 
 impl LayoutObjectSpatial for TextSpan {
-    fn bbox(&self) -> Rect { self.bbox }
+    fn bbox(&self) -> Rect {
+        self.bbox
+    }
 }
 
 impl LayoutObjectSpatial for Word {
-    fn bbox(&self) -> Rect { self.bbox }
+    fn bbox(&self) -> Rect {
+        self.bbox
+    }
 }
 
 impl LayoutObjectSpatial for TextLine {
-    fn bbox(&self) -> Rect { self.bbox }
+    fn bbox(&self) -> Rect {
+        self.bbox
+    }
 }
 
 impl LayoutObjectSpatial for PathContent {
-    fn bbox(&self) -> Rect { self.bbox }
+    fn bbox(&self) -> Rect {
+        self.bbox
+    }
 }
 
 /// Extension trait for filtering collections of layout objects.

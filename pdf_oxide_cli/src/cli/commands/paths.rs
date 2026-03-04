@@ -1,5 +1,5 @@
-use std::path::Path;
 use pdf_oxide::geometry::Rect;
+use std::path::Path;
 
 pub fn run(
     file: &Path,
@@ -46,7 +46,7 @@ pub fn run(
                 } else {
                     doc.extract_paths(page_idx)?
                 }
-            }
+            },
         };
 
         if json {
@@ -92,12 +92,12 @@ fn parse_area(s: &str) -> pdf_oxide::Result<Rect> {
     let y = parts[1].parse::<f32>().map_err(|_| {
         pdf_oxide::Error::InvalidOperation(format!("Invalid y coordinate: {}", parts[1]))
     })?;
-    let w = parts[2].parse::<f32>().map_err(|_| {
-        pdf_oxide::Error::InvalidOperation(format!("Invalid width: {}", parts[2]))
-    })?;
-    let h = parts[3].parse::<f32>().map_err(|_| {
-        pdf_oxide::Error::InvalidOperation(format!("Invalid height: {}", parts[3]))
-    })?;
+    let w = parts[2]
+        .parse::<f32>()
+        .map_err(|_| pdf_oxide::Error::InvalidOperation(format!("Invalid width: {}", parts[2])))?;
+    let h = parts[3]
+        .parse::<f32>()
+        .map_err(|_| pdf_oxide::Error::InvalidOperation(format!("Invalid height: {}", parts[3])))?;
 
     Ok(Rect::new(x, y, w, h))
 }

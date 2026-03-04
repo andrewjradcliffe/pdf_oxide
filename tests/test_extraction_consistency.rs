@@ -4,14 +4,28 @@ use std::io::Write;
 fn finalize_pdf(pdf: &mut Vec<u8>, obj_offsets: &[usize]) {
     let xref_offset = pdf.len();
     let count = obj_offsets.len();
-    pdf.extend_from_slice(format!("xref
+    pdf.extend_from_slice(
+        format!(
+            "xref
 0 {}
-", count).as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f 
-");
+",
+            count
+        )
+        .as_bytes(),
+    );
+    pdf.extend_from_slice(
+        b"0000000000 65535 f 
+",
+    );
     for &off in &obj_offsets[1..] {
-        pdf.extend_from_slice(format!("{:010} 00000 n 
-", off).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "{:010} 00000 n 
+",
+                off
+            )
+            .as_bytes(),
+        );
     }
     let trailer = format!(
         "trailer
@@ -27,22 +41,28 @@ startxref
 
 fn build_test_pdf_with_xobject() -> Vec<u8> {
     let mut pdf = Vec::new();
-    pdf.extend_from_slice(b"%PDF-1.4
-");
+    pdf.extend_from_slice(
+        b"%PDF-1.4
+",
+    );
 
     let obj1 = pdf.len();
-    pdf.extend_from_slice(b"1 0 obj
+    pdf.extend_from_slice(
+        b"1 0 obj
 << /Type /Catalog /Pages 2 0 R >>
 endobj
 
-");
+",
+    );
 
     let obj2 = pdf.len();
-    pdf.extend_from_slice(b"2 0 obj
+    pdf.extend_from_slice(
+        b"2 0 obj
 << /Type /Pages /Kids [3 0 R] /Count 1 >>
 endobj
 
-");
+",
+    );
 
     let obj3 = pdf.len();
     pdf.extend_from_slice(
@@ -67,11 +87,13 @@ stream
     );
     pdf.extend_from_slice(header.as_bytes());
     pdf.extend_from_slice(stream);
-    pdf.extend_from_slice(b"
+    pdf.extend_from_slice(
+        b"
 endstream
 endobj
 
-");
+",
+    );
 
     let obj5 = pdf.len();
     pdf.extend_from_slice(
@@ -85,17 +107,22 @@ endobj
 
     let obj6 = pdf.len();
     let content = b"BT /F1 12 Tf 10 50 Td (PageContent) Tj ET /X0 Do";
-    let header = format!("6 0 obj
+    let header = format!(
+        "6 0 obj
 << /Length {} >>
 stream
-", content.len());
+",
+        content.len()
+    );
     pdf.extend_from_slice(header.as_bytes());
     pdf.extend_from_slice(content);
-    pdf.extend_from_slice(b"
+    pdf.extend_from_slice(
+        b"
 endstream
 endobj
 
-");
+",
+    );
 
     finalize_pdf(&mut pdf, &[0, obj1, obj2, obj3, obj4, obj5, obj6]);
     pdf
@@ -114,9 +141,9 @@ fn write_temp_pdf(data: &[u8], name: &str) -> std::path::PathBuf {
 fn test_synthetic_repeated_extraction_consistency() {
     let data = build_test_pdf_with_xobject();
     let path = write_temp_pdf(&data, "consistency_test.pdf");
-    
+
     let mut doc = PdfDocument::open(&path).unwrap();
-    
+
     // 1. extract_spans
     let spans1 = doc.extract_spans(0).unwrap();
     assert!(!spans1.is_empty(), "First spans call should not be empty");
@@ -130,7 +157,7 @@ fn test_synthetic_repeated_extraction_consistency() {
     // 3. extract_chars (should IGNORE span cache and process stream)
     let chars1 = doc.extract_chars(0).unwrap();
     assert!(!chars1.is_empty(), "First chars call should not be empty");
-    
+
     // 4. extract_chars again
     let chars2 = doc.extract_chars(0).unwrap();
     assert_eq!(chars1.len(), chars2.len(), "Second chars call should match first");
@@ -144,9 +171,9 @@ fn test_synthetic_repeated_extraction_consistency() {
 fn test_synthetic_chars_then_spans_consistency() {
     let data = build_test_pdf_with_xobject();
     let path = write_temp_pdf(&data, "consistency_test_2.pdf");
-    
+
     let mut doc = PdfDocument::open(&path).unwrap();
-    
+
     // 1. extract_chars
     let chars1 = doc.extract_chars(0).unwrap();
     assert!(!chars1.is_empty(), "First chars call should not be empty");

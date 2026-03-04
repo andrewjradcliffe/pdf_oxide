@@ -13,14 +13,14 @@ pub mod info;
 pub mod markdown;
 pub mod merge;
 pub mod metadata;
+pub mod paths;
+pub mod render;
 pub mod reorder;
 pub mod rotate;
 pub mod search;
 pub mod split;
 pub mod text;
 pub mod watermark;
-pub mod render;
-pub mod paths;
 
 use pdf_oxide::PdfDocument;
 use std::path::Path;

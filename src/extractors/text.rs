@@ -1632,10 +1632,7 @@ impl<'a> Iterator for TextCharIter<'a> {
 
         let (char_code, bytes_consumed) = match self.byte_mode {
             ByteMode::TwoByte if self.index + 1 < self.bytes.len() => {
-                (
-                    ((self.bytes[self.index] as u16) << 8) | (self.bytes[self.index + 1] as u16),
-                    2,
-                )
+                (((self.bytes[self.index] as u16) << 8) | (self.bytes[self.index + 1] as u16), 2)
             },
             ByteMode::ShiftJIS => {
                 let b = self.bytes[self.index];

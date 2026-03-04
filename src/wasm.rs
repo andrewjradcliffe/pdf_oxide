@@ -34,9 +34,7 @@ use wasm_bindgen::prelude::*;
 use crate::api::PdfBuilder;
 use crate::converters::ConversionOptions;
 use crate::document::PdfDocument;
-use crate::editor::{
-    DocumentEditor, EncryptionAlgorithm, EncryptionConfig, Permissions, SaveOptions,
-};
+use crate::editor::DocumentEditor;
 use crate::search::{SearchOptions, TextSearcher};
 
 // ============================================================================
@@ -54,6 +52,19 @@ pub struct WasmPdfDocument {
     raw_bytes: Vec<u8>,
     /// Lazy-initialized editor for mutation operations
     editor: Option<DocumentEditor>,
+}
+
+impl Clone for WasmPdfDocument {
+    fn clone(&self) -> Self {
+        // Re-open document from raw bytes to "clone" it
+        let inner = PdfDocument::open_from_bytes(self.raw_bytes.clone())
+            .expect("document previously opened successfully");
+        Self {
+            inner,
+            raw_bytes: self.raw_bytes.clone(),
+            editor: None,
+        }
+    }
 }
 
 impl WasmPdfDocument {
@@ -157,7 +168,11 @@ impl WasmPdfDocument {
     /// @param page_index - Zero-based page number
     /// @param region - [x, y, width, height] in points
     #[wasm_bindgen(js_name = "within")]
-    pub fn within(&self, page_index: usize, region: Vec<f32>) -> Result<WasmPdfPageRegion, JsValue> {
+    pub fn within(
+        &self,
+        page_index: usize,
+        region: Vec<f32>,
+    ) -> Result<WasmPdfPageRegion, JsValue> {
         if region.len() < 4 {
             return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
         }
@@ -179,9 +194,7 @@ impl WasmPdfDocument {
     #[wasm_bindgen(js_name = "renderPage")]
     pub fn render_page(&mut self, page_index: usize, dpi: Option<u32>) -> Result<Vec<u8>, JsValue> {
         let opts = crate::rendering::RenderOptions::with_dpi(dpi.unwrap_or(150));
-        let img = self
-            .inner
-            .render_page(page_index, &opts)
+        let img = crate::rendering::render_page(&mut self.inner, page_index, &opts)
             .map_err(|e| JsValue::from_str(&format!("Failed to render page: {}", e)))?;
         Ok(img.as_bytes().to_vec())
     }
@@ -430,8 +443,10 @@ impl WasmPdfDocument {
             if r.len() < 4 {
                 return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
             }
-            self.inner
-                .extract_tables_in_rect(page_index, crate::geometry::Rect::new(r[0], r[1], r[2], r[3]))
+            self.inner.extract_tables_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+            )
         } else {
             self.inner.extract_tables(page_index)
         };
@@ -547,8 +562,10 @@ impl WasmPdfDocument {
             if r.len() < 4 {
                 return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
             }
-            self.inner
-                .extract_images_in_rect(page_index, crate::geometry::Rect::new(r[0], r[1], r[2], r[3]))
+            self.inner.extract_images_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+            )
         } else {
             self.inner.extract_images(page_index)
         };
@@ -580,10 +597,7 @@ impl WasmPdfDocument {
                     });
                     obj.insert("bbox".into(), bbox_obj);
                 }
-                obj.insert(
-                    "rotation".into(),
-                    serde_json::Value::from(img.rotation_degrees()),
-                );
+                obj.insert("rotation".into(), serde_json::Value::from(img.rotation_degrees()));
                 obj.insert("matrix".into(), serde_json::json!(img.matrix()));
                 serde_json::Value::Object(obj)
             })
@@ -909,20 +923,12 @@ impl WasmPdfPageRegion {
     /// Extract vector paths from this region.
     #[wasm_bindgen(js_name = "extractPaths")]
     pub fn extract_paths(&mut self) -> Result<JsValue, JsValue> {
-        self.doc.extract_paths(
-            self.page_index,
-            Some(vec![
-                self.region.x,
-                self.region.y,
-                self.region.width,
-                self.region.height,
-            ]),
-        )
+        self.doc.extract_paths(self.page_index)
     }
 }
 
+#[wasm_bindgen]
 impl WasmPdfDocument {
-
     // ========================================================================
     // Group 6c: Form Fields
     // ========================================================================

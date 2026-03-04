@@ -520,25 +520,28 @@ impl FontInfo {
             .get("ToUnicode")
             .and_then(|obj| obj.as_reference())
         {
-            let stream_opt = match doc.load_object(cmap_ref) {
-                Ok(cmap_obj) => match doc.decode_stream_with_encryption(&cmap_obj, cmap_ref) {
-                    Ok(data) => Some(data),
-                    Err(e) => {
-                        log::warn!(
+            let stream_opt =
+                match doc.load_object(cmap_ref) {
+                    Ok(cmap_obj) => match doc.decode_stream_with_encryption(&cmap_obj, cmap_ref) {
+                        Ok(data) => Some(data),
+                        Err(e) => {
+                            log::warn!(
                             "Font '{}': Failed to decrypt/decode ToUnicode CMap stream {:?}: {}",
                             base_font, cmap_ref, e
                         );
+                            None
+                        },
+                    },
+                    Err(e) => {
+                        log::warn!(
+                            "Font '{}': Failed to load ToUnicode CMap object {:?}: {}",
+                            base_font,
+                            cmap_ref,
+                            e
+                        );
                         None
-                    }
-                },
-                Err(e) => {
-                    log::warn!(
-                        "Font '{}': Failed to load ToUnicode CMap object {:?}: {}",
-                        base_font, cmap_ref, e
-                    );
-                    None
-                }
-            };
+                    },
+                };
 
             if let Some(stream_bytes) = stream_opt {
                 // Store raw bytes for lazy parsing — LazyCMap handles errors on first access.
@@ -893,49 +896,51 @@ impl FontInfo {
                     } else if let Some(stream_ref) = cidtogid_obj.as_reference() {
                         // Handle Stream object (binary uint16 array)
                         match doc.load_object(stream_ref) {
-                            Ok(stream_obj) => match doc.decode_stream_with_encryption(&stream_obj, stream_ref) {
-                                Ok(stream_data) => {
-                                    // Validate stream length (must be even)
-                                    if stream_data.len() % 2 != 0 {
-                                        log::warn!(
+                            Ok(stream_obj) => {
+                                match doc.decode_stream_with_encryption(&stream_obj, stream_ref) {
+                                    Ok(stream_data) => {
+                                        // Validate stream length (must be even)
+                                        if stream_data.len() % 2 != 0 {
+                                            log::warn!(
                                             "Font '{}': CIDToGIDMap stream has odd length {} (must be even). Using Identity fallback.",
                                             base_font,
                                             stream_data.len()
                                         );
-                                        Some(CIDToGIDMap::Identity)
-                                    } else if stream_data.is_empty() {
-                                        log::warn!(
+                                            Some(CIDToGIDMap::Identity)
+                                        } else if stream_data.is_empty() {
+                                            log::warn!(
                                             "Font '{}': CIDToGIDMap stream is empty. Using Identity fallback.",
                                             base_font
                                         );
-                                        Some(CIDToGIDMap::Identity)
-                                    } else {
-                                        // Parse big-endian uint16 array
-                                        let num_entries = stream_data.len() / 2;
-                                        let mut map = Vec::with_capacity(num_entries);
-                                        for i in 0..num_entries {
-                                            let gid = u16::from_be_bytes([
-                                                stream_data[i * 2],
-                                                stream_data[i * 2 + 1],
-                                            ]);
-                                            map.push(gid);
-                                        }
-                                        log::debug!(
+                                            Some(CIDToGIDMap::Identity)
+                                        } else {
+                                            // Parse big-endian uint16 array
+                                            let num_entries = stream_data.len() / 2;
+                                            let mut map = Vec::with_capacity(num_entries);
+                                            for i in 0..num_entries {
+                                                let gid = u16::from_be_bytes([
+                                                    stream_data[i * 2],
+                                                    stream_data[i * 2 + 1],
+                                                ]);
+                                                map.push(gid);
+                                            }
+                                            log::debug!(
                                             "Font '{}': Loaded explicit CIDToGIDMap with {} entries",
                                             base_font,
                                             num_entries
                                         );
-                                        Some(CIDToGIDMap::Explicit(map))
-                                    }
-                                },
-                                Err(e) => {
-                                    log::warn!(
+                                            Some(CIDToGIDMap::Explicit(map))
+                                        }
+                                    },
+                                    Err(e) => {
+                                        log::warn!(
                                         "Font '{}': CIDToGIDMap stream decode failed: {}. Using Identity fallback.",
                                         base_font,
                                         e
                                     );
-                                    Some(CIDToGIDMap::Identity)
-                                },
+                                        Some(CIDToGIDMap::Identity)
+                                    },
+                                }
                             },
                             Err(e) => {
                                 log::warn!(
@@ -1025,20 +1030,24 @@ impl FontInfo {
             Err(e) => {
                 log::warn!(
                     "Font '{}': Failed to load FontFile2 object {:?}: {}",
-                    base_font, ff2_ref, e
+                    base_font,
+                    ff2_ref,
+                    e
                 );
                 return None;
-            }
+            },
         };
         let font_data = match doc.decode_stream_with_encryption(&ff2_stream, ff2_ref) {
             Ok(data) => data,
             Err(e) => {
                 log::warn!(
                     "Font '{}': Failed to decrypt/decode FontFile2 stream {:?}: {}",
-                    base_font, ff2_ref, e
+                    base_font,
+                    ff2_ref,
+                    e
                 );
                 return None;
-            }
+            },
         };
         if font_data.is_empty() {
             return None;

@@ -269,7 +269,8 @@ impl EncryptDict {
                     Some(other) => {
                         log::warn!(
                             "V=4 R={}: unknown CFM '{}', falling back to AES-128",
-                            self.revision, other
+                            self.revision,
+                            other
                         );
                         Ok(Algorithm::Aes128)
                     },

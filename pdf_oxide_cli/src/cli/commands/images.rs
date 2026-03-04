@@ -1,5 +1,5 @@
-use std::path::Path;
 use pdf_oxide::geometry::Rect;
+use std::path::Path;
 
 pub fn run(
     file: &Path,
@@ -31,25 +31,27 @@ pub fn run(
         // If area is specified, we filter before saving
         let images = if let Some(r) = region {
             let filtered_images = doc.extract_images_in_rect(page_idx, r)?;
-            
+
             // Manually save filtered images
             let mut saved = Vec::new();
             let prefix = format!("{stem}_p{}", page_idx + 1);
             let mut idx = total_images + 1;
-            
+
             for img in filtered_images {
                 let (format, extension) = match img.data() {
-                    pdf_oxide::extractors::ImageData::Jpeg(_) => (pdf_oxide::ImageFormat::Jpeg, "jpg"),
+                    pdf_oxide::extractors::ImageData::Jpeg(_) => {
+                        (pdf_oxide::ImageFormat::Jpeg, "jpg")
+                    },
                     _ => (pdf_oxide::ImageFormat::Png, "png"),
                 };
                 let filename = format!("{}_{:03}.{}", prefix, idx, extension);
                 let filepath = out_dir.join(&filename);
-                
+
                 match format {
                     pdf_oxide::ImageFormat::Jpeg => img.save_as_jpeg(&filepath)?,
                     pdf_oxide::ImageFormat::Png => img.save_as_png(&filepath)?,
                 }
-                
+
                 saved.push(pdf_oxide::ExtractedImageRef {
                     filename,
                     format,
@@ -66,7 +68,7 @@ pub fn run(
             let prefix = format!("{stem}_p{}", page_idx + 1);
             doc.extract_images_to_files(page_idx, out_dir, Some(&prefix), Some(total_images + 1))?
         };
-        
+
         total_images += images.len();
         all_images.extend(images);
     }
@@ -126,12 +128,12 @@ fn parse_area(s: &str) -> pdf_oxide::Result<Rect> {
     let y = parts[1].parse::<f32>().map_err(|_| {
         pdf_oxide::Error::InvalidOperation(format!("Invalid y coordinate: {}", parts[1]))
     })?;
-    let w = parts[2].parse::<f32>().map_err(|_| {
-        pdf_oxide::Error::InvalidOperation(format!("Invalid width: {}", parts[2]))
-    })?;
-    let h = parts[3].parse::<f32>().map_err(|_| {
-        pdf_oxide::Error::InvalidOperation(format!("Invalid height: {}", parts[3]))
-    })?;
+    let w = parts[2]
+        .parse::<f32>()
+        .map_err(|_| pdf_oxide::Error::InvalidOperation(format!("Invalid width: {}", parts[2])))?;
+    let h = parts[3]
+        .parse::<f32>()
+        .map_err(|_| pdf_oxide::Error::InvalidOperation(format!("Invalid height: {}", parts[3])))?;
 
     Ok(Rect::new(x, y, w, h))
 }

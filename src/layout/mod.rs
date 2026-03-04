@@ -6,21 +6,21 @@
 //! - Font clustering and normalization
 //! - Bounded text extraction (v0.3.1)
 
+pub mod area_filter;
 pub mod clustering;
 pub mod document_analyzer;
 pub mod reading_order;
 pub mod text_block;
-pub mod area_filter;
 
 // Phase 2: Core architectural components
 pub mod bold_validation;
 pub mod font_normalization;
 
 // Re-export main types
+pub use area_filter::{LayoutObjectSpatial, RectFilterMode, SpatialCollectionFiltering};
 pub use document_analyzer::{AdaptiveLayoutParams, DocumentProperties};
 pub use reading_order::graph_based_reading_order;
 pub use text_block::{Color, FontWeight, TextBlock, TextChar, TextLine, TextSpan, Word};
-pub use area_filter::{RectFilterMode, LayoutObjectSpatial, SpatialCollectionFiltering};
 
 // Re-export Phase 2 components
 pub use bold_validation::{BoldGroup, BoldMarkerDecision, BoldMarkerValidator};

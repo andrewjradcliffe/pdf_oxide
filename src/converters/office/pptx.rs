@@ -94,7 +94,7 @@ impl PptxConverter {
 
         // Parse XML
         let mut reader = Reader::from_str(&xml_content);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut buf = Vec::new();
         let mut in_shape = false;
@@ -175,7 +175,7 @@ impl PptxConverter {
                 },
                 Ok(Event::Text(e)) => {
                     if in_text && in_text_body && in_shape {
-                        let text = e.unescape().unwrap_or_default();
+                        let text = e.xml_content().unwrap_or_default();
                         current_paragraph.push_str(&text);
                     }
                 },
@@ -204,7 +204,7 @@ impl PptxConverter {
         };
 
         let mut reader = Reader::from_str(&xml_content);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut buf = Vec::new();
         let mut in_title = false;
@@ -224,7 +224,7 @@ impl PptxConverter {
                 },
                 Ok(Event::Text(e)) => {
                     if in_title {
-                        title = Some(e.unescape().unwrap_or_default().to_string());
+                        title = Some(e.xml_content().unwrap_or_default().to_string());
                     }
                 },
                 Ok(Event::Eof) => break,

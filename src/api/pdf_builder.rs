@@ -857,7 +857,9 @@ impl Pdf {
     ) -> Result<Vec<crate::layout::Word>> {
         self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
-            editor.source_mut().extract_words_in_rect(page, region, mode)
+            editor
+                .source_mut()
+                .extract_words_in_rect(page, region, mode)
         } else {
             Err(Error::InvalidOperation("No document loaded".to_string()))
         }
@@ -926,10 +928,7 @@ impl Pdf {
     }
 
     /// Extract images from a page (v0.3.14).
-    pub fn extract_images(
-        &mut self,
-        page: usize,
-    ) -> Result<Vec<crate::extractors::PdfImage>> {
+    pub fn extract_images(&mut self, page: usize) -> Result<Vec<crate::extractors::PdfImage>> {
         self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor.source_mut().extract_images(page)
@@ -947,7 +946,11 @@ impl Pdf {
     /// let rect = Rect::new(0.0, 700.0, 612.0, 100.0); // Top header
     /// let header_text = pdf.within(0, rect).extract_text()?;
     /// ```
-    pub fn within(&mut self, page_index: usize, region: crate::geometry::Rect) -> PdfPageRegion<'_> {
+    pub fn within(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> PdfPageRegion<'_> {
         PdfPageRegion {
             pdf: self,
             page_index,
@@ -2341,14 +2344,16 @@ impl<'a> PdfPageRegion<'a> {
 
     /// Extract images from this region.
     pub fn extract_images(&mut self) -> Result<Vec<crate::extractors::PdfImage>> {
-        self.pdf.extract_images_in_rect(self.page_index, self.region)
+        self.pdf
+            .extract_images_in_rect(self.page_index, self.region)
     }
 
     /// Extract tables from this region.
     pub fn extract_tables(
         &mut self,
     ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
-        self.pdf.extract_tables_in_rect(self.page_index, self.region)
+        self.pdf
+            .extract_tables_in_rect(self.page_index, self.region)
     }
 }
 

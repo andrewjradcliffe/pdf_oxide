@@ -193,11 +193,7 @@ impl PyPdfDocument {
     ///
     /// Returns:
     ///     PdfPageRegion: A region object for scoped extraction
-    fn within(
-        slf: Py<Self>,
-        page: usize,
-        bbox: (f32, f32, f32, f32),
-    ) -> PyResult<PyPdfPageRegion> {
+    fn within(slf: Py<Self>, page: usize, bbox: (f32, f32, f32, f32)) -> PyResult<PyPdfPageRegion> {
         Ok(PyPdfPageRegion {
             doc: slf,
             page_index: page,
@@ -305,12 +301,7 @@ impl PyPdfDocument {
         };
 
         words_result
-            .map(|words| {
-                words
-                    .into_iter()
-                    .map(|w| PyWord { inner: w })
-                    .collect()
-            })
+            .map(|words| words.into_iter().map(|w| PyWord { inner: w }).collect())
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract words: {}", e)))
     }
 
@@ -338,12 +329,7 @@ impl PyPdfDocument {
         };
 
         lines_result
-            .map(|lines| {
-                lines
-                    .into_iter()
-                    .map(|l| PyTextLine { inner: l })
-                    .collect()
-            })
+            .map(|lines| lines.into_iter().map(|l| PyTextLine { inner: l }).collect())
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))
     }
 
@@ -3072,12 +3058,7 @@ impl PyPdfPageRegion {
     /// Get the bounding box of this region.
     #[getter]
     fn bbox(&self) -> (f32, f32, f32, f32) {
-        (
-            self.region.x,
-            self.region.y,
-            self.region.width,
-            self.region.height,
-        )
+        (self.region.x, self.region.y, self.region.width, self.region.height)
     }
 
     /// Extract text from this region.
@@ -3131,10 +3112,7 @@ impl PyPdfPageRegion {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "PdfPageRegion(page={}, bbox={:?})",
-            self.page_index, self.region
-        )
+        format!("PdfPageRegion(page={}, bbox={:?})", self.page_index, self.region)
     }
 }
 
@@ -4088,15 +4066,7 @@ impl PyTextLine {
 /// Convert PathContent to a Python dictionary.
 fn path_to_py_dict(py: Python<'_>, path: &crate::elements::PathContent) -> PyResult<Py<PyAny>> {
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item(
-        "bbox",
-        (
-            path.bbox.x,
-            path.bbox.y,
-            path.bbox.width,
-            path.bbox.height,
-        ),
-    )?;
+    dict.set_item("bbox", (path.bbox.x, path.bbox.y, path.bbox.width, path.bbox.height))?;
     dict.set_item("stroke_width", path.stroke_width)?;
 
     if let Some(ref color) = path.stroke_color {
