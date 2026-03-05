@@ -62,6 +62,27 @@ class PdfDocument:
         """
         ...
 
+    @staticmethod
+    def from_bytes(data: bytes) -> "PdfDocument":
+        """
+        Open a PDF from bytes.
+
+        Args:
+            data: Raw PDF data
+
+        Returns:
+            PdfDocument: Opened PDF document
+
+        Raises:
+            IOError: If the data is not a valid PDF
+
+        Example:
+            >>> with open("sample.pdf", "rb") as f:
+            ...     doc = PdfDocument.from_bytes(f.read())
+            >>> print(doc.page_count())
+        """
+        ...
+
     def version(self) -> Tuple[int, int]:
         """
         Get PDF version.

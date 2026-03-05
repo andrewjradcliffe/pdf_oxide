@@ -203,6 +203,43 @@ def test_to_html_all_multipage():
         pytest.skip("Test fixture 'multipage.pdf' not available")
 
 
+# === From Bytes Tests ===
+
+
+def test_from_bytes_matches_file():
+    """Test that from_bytes produces the same results as opening from path."""
+    with open("tests/fixtures/simple.pdf", "rb") as f:
+        data = f.read()
+    doc_path = PdfDocument("tests/fixtures/simple.pdf")
+    doc_bytes = PdfDocument.from_bytes(data)
+
+    assert doc_path.version() == doc_bytes.version()
+    assert doc_path.page_count() == doc_bytes.page_count()
+    assert doc_path.extract_text(0) == doc_bytes.extract_text(0)
+
+
+def test_from_bytes_roundtrip():
+    """Test opening bytes from a PDF created with Pdf.from_text."""
+    from pdf_oxide import Pdf
+
+    pdf = Pdf.from_text("Hello from bytes!")
+    pdf_bytes = pdf.to_bytes()
+
+    doc = PdfDocument.from_bytes(pdf_bytes)
+    assert doc.page_count() >= 1
+    text = doc.extract_text(0)
+    assert "Hello from bytes!" in text
+
+
+def test_from_bytes_invalid():
+    """Test error handling for invalid bytes."""
+    with pytest.raises(IOError):
+        PdfDocument.from_bytes(b"not a pdf")
+
+
+# === Error Handling Tests ===
+
+
 def test_error_handling_nonexistent_file():
     """Test error handling for non-existent file."""
     with pytest.raises(IOError) as exc_info:

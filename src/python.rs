@@ -47,18 +47,28 @@ pub struct PyPdfDocument {
     /// Inner Rust document
     inner: RustPdfDocument,
     /// Path for DOM access (lazy initialization)
-    path: String,
+    path: Option<String>,
+    /// Raw bytes for editor initialization when opened from bytes
+    raw_bytes: Option<Vec<u8>>,
     /// Cached editor for DOM access (lazy initialization)
     editor: Option<RustDocumentEditor>,
 }
 
 impl PyPdfDocument {
-    /// Ensure the editor is initialized, creating it from the path if needed.
+    /// Ensure the editor is initialized, creating it from the path or bytes if needed.
     fn ensure_editor(&mut self) -> PyResult<()> {
         if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
+            let editor = if let Some(ref path) = self.path {
+                RustDocumentEditor::open(path)
+            } else if let Some(ref bytes) = self.raw_bytes {
+                RustDocumentEditor::open_from_bytes(bytes.clone())
+            } else {
+                return Err(PyRuntimeError::new_err("No path or bytes available for editor"));
+            };
+            self.editor =
+                Some(editor.map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to open editor: {}", e))
+                })?);
         }
         Ok(())
     }
@@ -88,7 +98,37 @@ impl PyPdfDocument {
 
         Ok(PyPdfDocument {
             inner: doc,
-            path,
+            path: Some(path),
+            raw_bytes: None,
+            editor: None,
+        })
+    }
+
+    /// Open a PDF from bytes.
+    ///
+    /// Args:
+    ///     data (bytes): Raw PDF data
+    ///
+    /// Returns:
+    ///     PdfDocument: Opened PDF document
+    ///
+    /// Raises:
+    ///     IOError: If the data is not a valid PDF
+    ///
+    /// Example:
+    ///     >>> with open("sample.pdf", "rb") as f:
+    ///     ...     doc = PdfDocument.from_bytes(f.read())
+    ///     >>> print(doc.page_count())
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<Self> {
+        let bytes = data.to_vec();
+        let doc = RustPdfDocument::open_from_bytes(bytes.clone())
+            .map_err(|e| PyIOError::new_err(format!("Failed to open PDF from bytes: {}", e)))?;
+
+        Ok(PyPdfDocument {
+            inner: doc,
+            path: None,
+            raw_bytes: Some(bytes),
             editor: None,
         })
     }
@@ -819,11 +859,7 @@ impl PyPdfDocument {
     ///     ...     print(f"{text.value} at {text.bbox}")
     fn page(&mut self, index: usize) -> PyResult<PyPdfPage> {
         // Lazy-initialize editor if needed
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
 
         let editor = self.editor.as_mut().unwrap();
         let page = editor
@@ -881,9 +917,7 @@ impl PyPdfDocument {
 
         // Ensure we have an editor if there are pending erasures
         if self.editor.is_none() && !self.inner.erase_regions.is_empty() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
+            self.ensure_editor()?;
         }
 
         // Sync erasures if editor is active
@@ -994,11 +1028,7 @@ impl PyPdfDocument {
     ///     >>> doc.set_title("My Document")
     fn set_title(&mut self, title: &str) -> PyResult<()> {
         // Lazy-initialize editor if needed
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor.set_title(title);
         }
@@ -1010,11 +1040,7 @@ impl PyPdfDocument {
     /// Args:
     ///     author (str): Author name
     fn set_author(&mut self, author: &str) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor.set_author(author);
         }
@@ -1026,11 +1052,7 @@ impl PyPdfDocument {
     /// Args:
     ///     subject (str): Document subject
     fn set_subject(&mut self, subject: &str) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor.set_subject(subject);
         }
@@ -1042,11 +1064,7 @@ impl PyPdfDocument {
     /// Args:
     ///     keywords (str): Comma-separated keywords
     fn set_keywords(&mut self, keywords: &str) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor.set_keywords(keywords);
         }
@@ -1069,11 +1087,7 @@ impl PyPdfDocument {
     ///     >>> rotation = doc.page_rotation(0)
     ///     >>> print(f"Page is rotated {rotation} degrees")
     fn page_rotation(&mut self, page: usize) -> PyResult<i32> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .get_page_rotation(page)
@@ -1093,11 +1107,7 @@ impl PyPdfDocument {
     ///     >>> doc.set_page_rotation(0, 90)
     ///     >>> doc.save("rotated.pdf")
     fn set_page_rotation(&mut self, page: usize, degrees: i32) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .set_page_rotation(page, degrees)
@@ -1117,11 +1127,7 @@ impl PyPdfDocument {
     ///     >>> doc.rotate_page(0, 90)  # Rotate 90 degrees clockwise
     ///     >>> doc.save("rotated.pdf")
     fn rotate_page(&mut self, page: usize, degrees: i32) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .rotate_page_by(page, degrees)
@@ -1140,11 +1146,7 @@ impl PyPdfDocument {
     ///     >>> doc.rotate_all_pages(180)  # Flip all pages upside down
     ///     >>> doc.save("rotated.pdf")
     fn rotate_all_pages(&mut self, degrees: i32) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .rotate_all_pages(degrees)
@@ -1166,11 +1168,7 @@ impl PyPdfDocument {
     ///     >>> llx, lly, urx, ury = doc.page_media_box(0)
     ///     >>> print(f"Page size: {urx - llx} x {ury - lly}")
     fn page_media_box(&mut self, page: usize) -> PyResult<(f32, f32, f32, f32)> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             let box_ = editor
                 .get_page_media_box(page)
@@ -1197,11 +1195,7 @@ impl PyPdfDocument {
         urx: f32,
         ury: f32,
     ) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .set_page_media_box(page, [llx, lly, urx, ury])
@@ -1219,11 +1213,7 @@ impl PyPdfDocument {
     /// Returns:
     ///     tuple[float, float, float, float] | None: (llx, lly, urx, ury) or None if not set
     fn page_crop_box(&mut self, page: usize) -> PyResult<Option<(f32, f32, f32, f32)>> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             let box_ = editor
                 .get_page_crop_box(page)
@@ -1257,11 +1247,7 @@ impl PyPdfDocument {
         urx: f32,
         ury: f32,
     ) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .set_page_crop_box(page, [llx, lly, urx, ury])
@@ -1288,11 +1274,7 @@ impl PyPdfDocument {
     /// >>> doc.save("cropped.pdf")
     /// ```
     fn crop_margins(&mut self, left: f32, right: f32, top: f32, bottom: f32) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .crop_margins(left, right, top, bottom)
@@ -1338,11 +1320,7 @@ impl PyPdfDocument {
             .erase_region(page, rect)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to mark region: {}", e)))?;
 
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .erase_region(page, [llx, lly, urx, ury])
@@ -1362,6 +1340,7 @@ impl PyPdfDocument {
     ///     >>> doc.erase_regions(0, [(72, 700, 200, 792), (300, 300, 500, 400)])
     ///     >>> doc.save("output.pdf")
     fn erase_regions(&mut self, page: usize, rects: Vec<(f32, f32, f32, f32)>) -> PyResult<()> {
+<<<<<<< HEAD
         for (llx, lly, urx, ury) in &rects {
             let rect = crate::geometry::Rect::new(*llx, *lly, *urx - *llx, *ury - *lly);
             self.inner
@@ -1369,11 +1348,7 @@ impl PyPdfDocument {
                 .map_err(|e| PyRuntimeError::new_err(format!("Failed to mark region: {}", e)))?;
         }
 
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             let rect_arrays: Vec<[f32; 4]> = rects
                 .iter()
@@ -1420,11 +1395,7 @@ impl PyPdfDocument {
     ///     >>> doc.flatten_page_annotations(0)  # Flatten page 0
     ///     >>> doc.save("flattened.pdf")
     fn flatten_page_annotations(&mut self, page: usize) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor.flatten_page_annotations(page).map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to flatten annotations: {}", e))
@@ -1446,11 +1417,7 @@ impl PyPdfDocument {
     ///     >>> doc.flatten_all_annotations()
     ///     >>> doc.save("flattened.pdf")
     fn flatten_all_annotations(&mut self) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor.flatten_all_annotations().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to flatten annotations: {}", e))
@@ -1507,11 +1474,7 @@ impl PyPdfDocument {
     ///     >>> doc.apply_page_redactions(0)
     ///     >>> doc.save("redacted.pdf")
     fn apply_page_redactions(&mut self, page: usize) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .apply_page_redactions(page)
@@ -1533,11 +1496,7 @@ impl PyPdfDocument {
     ///     >>> doc.apply_all_redactions()
     ///     >>> doc.save("redacted.pdf")
     fn apply_all_redactions(&mut self) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .apply_all_redactions()
@@ -1591,11 +1550,7 @@ impl PyPdfDocument {
     ///         - height (float): Image height
     ///         - matrix (tuple): 6-element transformation matrix (a, b, c, d, e, f)
     fn page_images(&mut self, page: usize, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             let images = editor.get_page_images(page).map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to get page images: {}", e))
@@ -1639,11 +1594,7 @@ impl PyPdfDocument {
     /// Raises:
     ///     RuntimeError: If the image is not found or operation fails
     fn reposition_image(&mut self, page: usize, image_name: &str, x: f32, y: f32) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .reposition_image(page, image_name, x, y)
@@ -1670,11 +1621,7 @@ impl PyPdfDocument {
         width: f32,
         height: f32,
     ) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .resize_image(page, image_name, width, height)
@@ -1705,11 +1652,7 @@ impl PyPdfDocument {
         width: f32,
         height: f32,
     ) -> PyResult<()> {
-        if self.editor.is_none() {
-            let editor = RustDocumentEditor::open(&self.path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
-            self.editor = Some(editor);
-        }
+        self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
                 .set_image_bounds(page, image_name, x, y, width, height)

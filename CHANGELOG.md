@@ -13,6 +13,7 @@ All notable changes to PDFOxide are documented here.
     - **Edit:** Ability to mask or replace existing content on a per-page basis via `edit_header()`, `edit_footer()`, and `edit_artifacts()`.
 - **Page Templates** — Introduced `PageTemplate`, `HeaderFooter`, and `HFStyle` classes for reusable page design. Supports dynamic placeholders like `{page}`, `{pages}`, `{title}`, and `{author}`.
 - **Scoped Extraction Filtering** — Updated all extraction methods to respect `erase_regions`, enabling clean text extraction by excluding identified headers and footers.
+- **Python `PdfDocument.from_bytes()`** — Open PDFs directly from in-memory bytes without requiring a file path.
 - **Future-Proofed Rust API** — Implemented `Default` trait for key extraction structs (`TextSpan`, `TextChar`, `TextContent`) to protect users from future field additions.
 
 ### Bug Fixes
