@@ -672,7 +672,11 @@ fn detect_tables_from_lines(
         })
         .collect();
 
-    let grid = GridStructure { columns, rows, cells };
+    let grid = GridStructure {
+        columns,
+        rows,
+        cells,
+    };
 
     if !validate_table_structure(&grid, config) {
         return Vec::new();
@@ -1434,10 +1438,10 @@ mod tests {
         //   (30, 100) → row 0, col 0    (80, 100) → row 0, col 1
         //   (30,  80) → row 1, col 0    (80,  80) → row 1, col 1
         let spans = vec![
-            create_test_span("A", 25.0, 95.0, 10.0, 10.0),  // center (30, 100)
-            create_test_span("B", 75.0, 95.0, 10.0, 10.0),  // center (80, 100)
-            create_test_span("C", 25.0, 75.0, 10.0, 10.0),  // center (30,  80)
-            create_test_span("D", 75.0, 75.0, 10.0, 10.0),  // center (80,  80)
+            create_test_span("A", 25.0, 95.0, 10.0, 10.0), // center (30, 100)
+            create_test_span("B", 75.0, 95.0, 10.0, 10.0), // center (80, 100)
+            create_test_span("C", 25.0, 75.0, 10.0, 10.0), // center (30,  80)
+            create_test_span("D", 75.0, 75.0, 10.0, 10.0), // center (80,  80)
         ];
 
         let lines = vec![
@@ -1469,18 +1473,18 @@ mod tests {
         //  Col 0: x=5..55   Col 1: x=55..105
         //  Row 0: y=90..110   Row 1: y=70..90
         let spans = vec![
-            create_test_span("A", 25.0, 95.0, 10.0, 10.0),  // col 0, row 0
-            create_test_span("B", 75.0, 95.0, 10.0, 10.0),  // col 1, row 0
-            create_test_span("C", 25.0, 75.0, 10.0, 10.0),  // col 0, row 1
-            create_test_span("D", 75.0, 75.0, 10.0, 10.0),  // col 1, row 1
+            create_test_span("A", 25.0, 95.0, 10.0, 10.0), // col 0, row 0
+            create_test_span("B", 75.0, 95.0, 10.0, 10.0), // col 1, row 0
+            create_test_span("C", 25.0, 75.0, 10.0, 10.0), // col 0, row 1
+            create_test_span("D", 75.0, 75.0, 10.0, 10.0), // col 1, row 1
         ];
 
         // Four cell rectangles forming a 2x2 grid.
         let lines = vec![
-            make_rect_path(5.0, 90.0, 50.0, 20.0),   // (0,0): x=5..55,  y=90..110
-            make_rect_path(55.0, 90.0, 50.0, 20.0),  // (0,1): x=55..105, y=90..110
-            make_rect_path(5.0, 70.0, 50.0, 20.0),   // (1,0): x=5..55,  y=70..90
-            make_rect_path(55.0, 70.0, 50.0, 20.0),  // (1,1): x=55..105, y=70..90
+            make_rect_path(5.0, 90.0, 50.0, 20.0), // (0,0): x=5..55,  y=90..110
+            make_rect_path(55.0, 90.0, 50.0, 20.0), // (0,1): x=55..105, y=90..110
+            make_rect_path(5.0, 70.0, 50.0, 20.0), // (1,0): x=5..55,  y=70..90
+            make_rect_path(55.0, 70.0, 50.0, 20.0), // (1,1): x=55..105, y=70..90
         ];
 
         let config = TableDetectionConfig {
