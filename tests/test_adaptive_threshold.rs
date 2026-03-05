@@ -31,22 +31,10 @@ use pdf_oxide::layout::{Color, FontWeight, TextSpan};
 /// * `height` - Height of the span (in points, usually font size)
 fn create_test_span(text: &str, x: f32, y: f32, width: f32, height: f32) -> TextSpan {
     TextSpan {
-        artifact_type: None,
         text: text.to_string(),
         bbox: Rect::new(x, y, width, height),
-        font_name: "Times".to_string(),
         font_size: height,
-        font_weight: FontWeight::Normal,
-        is_italic: false,
-        color: Color::black(),
-        mcid: None,
-        sequence: 0,
-        split_boundary_before: false,
-        offset_semantic: false,
-        char_spacing: 0.0,
-        word_spacing: 0.0,
-        horizontal_scaling: 100.0,
-        primary_detected: false,
+        ..Default::default()
     }
 }
 
@@ -91,22 +79,11 @@ fn create_multiline_document(gaps_per_line: Vec<Vec<f32>>, line_spacing: f32) ->
 
         for (word_idx, &gap) in gaps.iter().enumerate() {
             let span = TextSpan {
-                artifact_type: None,
                 text: format!("L{}W{}", line_idx, word_idx),
                 bbox: Rect::new(x_pos, y_pos, span_width, height),
-                font_name: "Times".to_string(),
                 font_size: height,
-                font_weight: FontWeight::Normal,
-                is_italic: false,
-                color: Color::black(),
-                mcid: None,
                 sequence: line_idx * 100 + word_idx,
-                split_boundary_before: false,
-                offset_semantic: false,
-                char_spacing: 0.0,
-                word_spacing: 0.0,
-                horizontal_scaling: 100.0,
-                primary_detected: false,
+                ..Default::default()
             };
             spans.push(span);
             x_pos += span_width + gap;

@@ -54,6 +54,29 @@ pub struct TextSpan {
     pub artifact_type: Option<ArtifactType>,
 }
 
+impl Default for TextSpan {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            bbox: Rect::default(),
+            font_name: "Helvetica".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            is_italic: false,
+            color: Color::black(),
+            mcid: None,
+            sequence: 0,
+            split_boundary_before: false,
+            offset_semantic: false,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scaling: 100.0,
+            primary_detected: false,
+            artifact_type: None,
+        }
+    }
+}
+
 impl TextSpan {
     /// Decompose the span into individual characters.
     pub fn to_chars(&self) -> Vec<TextChar> {
@@ -173,6 +196,26 @@ pub struct TextChar {
     /// ```
     /// Where (a,d) = scaling, (b,c) = rotation/skew, (e,f) = translation.
     pub matrix: Option<[f32; 6]>,
+}
+
+impl Default for TextChar {
+    fn default() -> Self {
+        Self {
+            char: ' ',
+            bbox: Rect::default(),
+            font_name: "Helvetica".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            is_italic: false,
+            color: Color::black(),
+            mcid: None,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            rotation_degrees: 0.0,
+            advance_width: 0.0,
+            matrix: Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+        }
+    }
 }
 
 impl TextChar {
@@ -309,7 +352,7 @@ impl FontWeight {
 }
 
 /// RGB color representation.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, Default)]
 pub struct Color {
     /// Red channel (0.0 - 1.0)
     pub r: f32,

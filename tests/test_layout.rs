@@ -21,18 +21,11 @@ fn mock_char(c: char, x: f32, y: f32, size: f32) -> TextChar {
     TextChar {
         char: c,
         bbox: Rect::new(x, y, width, size),
-        font_name: "Times".to_string(),
         font_size: size,
-        font_weight: FontWeight::Normal,
-        is_italic: false,
-        color: Color::black(),
-        mcid: None,
-        // v0.3.1 transformation properties
         origin_x: x,
         origin_y: y,
-        rotation_degrees: 0.0,
         advance_width: width,
-        matrix: None,
+        ..Default::default()
     }
 }
 
@@ -45,15 +38,10 @@ fn mock_bold_char(c: char, x: f32, y: f32, size: f32) -> TextChar {
         font_name: "Times-Bold".to_string(),
         font_size: size,
         font_weight: FontWeight::Bold,
-        is_italic: false,
-        color: Color::black(),
-        mcid: None,
-        // v0.3.1 transformation properties
         origin_x: x,
         origin_y: y,
-        rotation_degrees: 0.0,
         advance_width: width,
-        matrix: None,
+        ..Default::default()
     }
 }
 

@@ -1741,7 +1741,7 @@ pub enum PaginationSubtype {
 /// Tracks nested marked content tags to implement artifact filtering.
 /// When content is marked as `/Artifact`, it should be excluded from text extraction.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct MarkedContentContext {
     tag: String,
     is_artifact: bool,

@@ -4,7 +4,7 @@
 //! the layout analysis algorithms.
 
 /// A 2D point in document space.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, Default)]
 pub struct Point {
     /// X coordinate
     pub x: f32,
@@ -30,7 +30,7 @@ impl Point {
 }
 
 /// A rectangle in document space.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, Default)]
 pub struct Rect {
     /// X coordinate of top-left corner
     pub x: f32,

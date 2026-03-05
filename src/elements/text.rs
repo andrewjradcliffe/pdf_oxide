@@ -12,7 +12,7 @@ use crate::layout::{Color, FontWeight, TextSpan};
 /// This is the unified text representation for both reading and writing.
 /// Unlike `TextSpan` which is extraction-focused, `TextContent` is designed
 /// to work symmetrically for both directions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TextContent {
     /// The text string
     pub text: String,
@@ -176,6 +176,15 @@ pub struct FontSpec {
     pub size: f32,
 }
 
+impl Default for FontSpec {
+    fn default() -> Self {
+        Self {
+            name: "Helvetica".to_string(),
+            size: 12.0,
+        }
+    }
+}
+
 impl FontSpec {
     /// Create a new font specification.
     pub fn new(name: impl Into<String>, size: f32) -> Self {
@@ -201,15 +210,6 @@ impl FontSpec {
     }
 }
 
-impl Default for FontSpec {
-    fn default() -> Self {
-        Self {
-            name: "Helvetica".to_string(),
-            size: 12.0,
-        }
-    }
-}
-
 /// Font style classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FontStyle {
@@ -223,7 +223,7 @@ pub enum FontStyle {
 }
 
 /// Text styling information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TextStyle {
     /// Font weight (normal, bold, etc.)
     pub weight: FontWeight,
@@ -284,18 +284,6 @@ impl TextStyle {
     pub fn with_color(mut self, color: Color) -> Self {
         self.color = color;
         self
-    }
-}
-
-impl Default for TextStyle {
-    fn default() -> Self {
-        Self {
-            weight: FontWeight::Normal,
-            italic: false,
-            color: Color::black(),
-            underline: false,
-            strikethrough: false,
-        }
     }
 }
 
