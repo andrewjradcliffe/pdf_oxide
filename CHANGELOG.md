@@ -21,7 +21,6 @@ All notable changes to PDFOxide are documented here.
 - **Fixed Multi-Column Reading Order** (#211) — Refactored `extract_words()` and `extract_text_lines()` to use XY-Cut partitioning. This prevents text from adjacent columns from being interleaved and standardizes top-to-bottom extraction. (Reported by **@ankursri494**)
 - **Resolved Font Identity Collisions** (#213) — Improved font identity hashing to include `ToUnicode` and `DescendantFonts` references. Fixes garbled text extraction in documents where multiple fonts share the same name but use different character mappings. (Reported by **@productdevbook**)
 - **Fixed `Lines` table strategy false positives** (#215) — `extract_tables()` with `horizontal_strategy="lines"` now builds the grid purely from vector path geometry and returns empty when no lines are found, preventing spurious tables on plain-text pages. (Contributed by **@hoesler**)
-- **Fixed Encrypted `CIDToGIDMap` Handling** (#202) — Ensured `CIDToGIDMap` streams are correctly decrypted in encrypted PDFs, fixing empty text extraction for certain OpenPDF-generated files. (Contributed by **@vincenzopalazzo** in #203)
 - **Optimized CMap Parsing** — Standardized 2-byte consumption for Identity-H fonts and improved robust decoding for Turkish and other extended character sets.
 
 ## [0.3.14] - 2026-03-03
