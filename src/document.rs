@@ -184,7 +184,8 @@ pub struct PdfDocument {
     pub(crate) xobject_stream_cache_bytes: Cell<usize>,
     /// Cache of extracted TextSpan results from self-contained Form XObjects
     /// (those with own /Resources/Font). None = processed but no spans.
-    pub(crate) xobject_spans_cache: RefCell<HashMap<ObjectRef, Option<Vec<crate::layout::TextSpan>>>>,
+    pub(crate) xobject_spans_cache:
+        RefCell<HashMap<ObjectRef, Option<Vec<crate::layout::TextSpan>>>>,
     /// Cache of extracted images from Form XObjects (keyed by ObjectRef).
     /// Images are stored without CTM applied — caller applies its own CTM.
     pub(crate) form_xobject_images_cache: HashMap<ObjectRef, Vec<crate::extractors::PdfImage>>,
@@ -1128,7 +1129,12 @@ impl PdfDocument {
 
         // Seek to object offset and read a small buffer
         let offset = entry.offset;
-        if self.reader.borrow_mut().seek(SeekFrom::Start(offset)).is_err() {
+        if self
+            .reader
+            .borrow_mut()
+            .seek(SeekFrom::Start(offset))
+            .is_err()
+        {
             return true;
         }
 
@@ -1181,7 +1187,10 @@ impl PdfDocument {
         // Read bytes for object header (e.g., "1 0 obj")
         // Use bytes instead of String to handle binary data gracefully
         let mut header_bytes = Vec::new();
-        let bytes_read = self.reader.borrow_mut().read_until(b'\n', &mut header_bytes)?;
+        let bytes_read = self
+            .reader
+            .borrow_mut()
+            .read_until(b'\n', &mut header_bytes)?;
 
         if bytes_read == 0 {
             log::warn!("Unexpected EOF while reading object {} header", obj_ref.id);
@@ -1200,7 +1209,10 @@ impl PdfDocument {
 
         while !has_standalone_obj_keyword(&full_header) && lines_read < max_header_lines {
             let mut next_bytes = Vec::new();
-            let next_read = self.reader.borrow_mut().read_until(b'\n', &mut next_bytes)?;
+            let next_read = self
+                .reader
+                .borrow_mut()
+                .read_until(b'\n', &mut next_bytes)?;
 
             if next_read == 0 {
                 break; // EOF reached
@@ -1510,11 +1522,7 @@ impl PdfDocument {
     ///
     /// We search up to 100 bytes backwards, looking for a line that matches
     /// the expected object header format.
-    fn find_object_header_backwards(
-        &self,
-        obj_ref: ObjectRef,
-        wrong_offset: u64,
-    ) -> Result<u64> {
+    fn find_object_header_backwards(&self, obj_ref: ObjectRef, wrong_offset: u64) -> Result<u64> {
         // Don't search before the start of the file
         if wrong_offset == 0 {
             return Err(Error::ParseError {
@@ -1528,7 +1536,9 @@ impl PdfDocument {
         let search_start = wrong_offset - search_distance;
 
         // Read the search region
-        self.reader.borrow_mut().seek(SeekFrom::Start(search_start))?;
+        self.reader
+            .borrow_mut()
+            .seek(SeekFrom::Start(search_start))?;
         let mut buffer = vec![0u8; search_distance as usize + 100]; // Extra bytes to read full line
         let bytes_read = self.reader.borrow_mut().read(&mut buffer)?;
 
@@ -6721,7 +6731,8 @@ impl PdfDocument {
             // Layer 2: Check font set cache for the /Font dictionary.
             // Pages sharing the same /Font dict skip the entire per-font loop.
             if let Some(font_dict_ref) = font_dict_ref {
-                if let Some(cached_set) = self.font_set_cache.borrow().get(&font_dict_ref).cloned() {
+                if let Some(cached_set) = self.font_set_cache.borrow().get(&font_dict_ref).cloned()
+                {
                     for (name, font_arc) in &cached_set {
                         extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
                     }
@@ -6754,7 +6765,12 @@ impl PdfDocument {
                     hasher.finish()
                 };
 
-                if let Some(cached_set) = self.font_fingerprint_cache.borrow().get(&fingerprint).cloned() {
+                if let Some(cached_set) = self
+                    .font_fingerprint_cache
+                    .borrow()
+                    .get(&fingerprint)
+                    .cloned()
+                {
                     for (name, font_arc) in &cached_set {
                         extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
                     }
@@ -6819,8 +6835,12 @@ impl PdfDocument {
 
                         // Layer 5: Per-font identity cache — skip from_dict when a
                         // structurally identical font was already parsed elsewhere.
-                        if let Some(cached) = self.font_identity_cache.borrow().get(&id_hash).cloned() {
-                            self.font_cache.borrow_mut().insert(font_ref, Arc::clone(&cached));
+                        if let Some(cached) =
+                            self.font_identity_cache.borrow().get(&id_hash).cloned()
+                        {
+                            self.font_cache
+                                .borrow_mut()
+                                .insert(font_ref, Arc::clone(&cached));
                             extractor.add_font_shared(name.clone(), cached);
                             continue;
                         }
@@ -6830,9 +6850,12 @@ impl PdfDocument {
                         if let Some(cached) =
                             crate::fonts::global_cache::global_font_cache_get(id_hash)
                         {
-                            self.font_identity_cache.borrow_mut()
+                            self.font_identity_cache
+                                .borrow_mut()
                                 .insert(id_hash, Arc::clone(&cached));
-                            self.font_cache.borrow_mut().insert(font_ref, Arc::clone(&cached));
+                            self.font_cache
+                                .borrow_mut()
+                                .insert(font_ref, Arc::clone(&cached));
                             extractor.add_font_shared(name.clone(), cached);
                             continue;
                         }
@@ -6845,8 +6868,12 @@ impl PdfDocument {
                                     id_hash,
                                     Arc::clone(&arc),
                                 );
-                                self.font_identity_cache.borrow_mut().insert(id_hash, Arc::clone(&arc));
-                                self.font_cache.borrow_mut().insert(font_ref, Arc::clone(&arc));
+                                self.font_identity_cache
+                                    .borrow_mut()
+                                    .insert(id_hash, Arc::clone(&arc));
+                                self.font_cache
+                                    .borrow_mut()
+                                    .insert(font_ref, Arc::clone(&arc));
                                 extractor.add_font_shared(name.clone(), arc);
                             },
                             Err(e) => {
@@ -6887,14 +6914,18 @@ impl PdfDocument {
                 // Cache font set by both ObjectRef and fingerprint
                 let font_set = extractor.get_font_set();
                 if let Some(fdr) = font_dict_ref {
-                    self.font_set_cache.borrow_mut().insert(fdr, font_set.clone());
+                    self.font_set_cache
+                        .borrow_mut()
+                        .insert(fdr, font_set.clone());
                 }
-                self.font_fingerprint_cache.borrow_mut()
+                self.font_fingerprint_cache
+                    .borrow_mut()
                     .insert(fingerprint, font_set.clone());
 
                 // Cache by font names with spot-check data for Layer 4
                 if let Some((check_name, check_hash)) = spot_check {
-                    self.font_name_set_cache.borrow_mut()
+                    self.font_name_set_cache
+                        .borrow_mut()
                         .insert(name_hash, (Arc::new(font_set), check_name, check_hash));
                 }
 
@@ -8207,7 +8238,12 @@ impl PdfDocument {
         };
 
         // Decode form stream — check cache first to avoid repeated decompression
-        let stream_data = if let Some(cached) = self.xobject_stream_cache.borrow().get(&xobject_ref).cloned() {
+        let stream_data = if let Some(cached) = self
+            .xobject_stream_cache
+            .borrow()
+            .get(&xobject_ref)
+            .cloned()
+        {
             cached.as_ref().clone()
         } else {
             match self.decode_stream_with_encryption(xobject, xobject_ref) {
@@ -8215,8 +8251,10 @@ impl PdfDocument {
                     const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
                     let current_bytes = self.xobject_stream_cache_bytes.get();
                     if current_bytes + data.len() <= MAX_STREAM_CACHE_BYTES {
-                        self.xobject_stream_cache_bytes.set(current_bytes + data.len());
-                        self.xobject_stream_cache.borrow_mut()
+                        self.xobject_stream_cache_bytes
+                            .set(current_bytes + data.len());
+                        self.xobject_stream_cache
+                            .borrow_mut()
                             .insert(xobject_ref, std::sync::Arc::new(data.clone()));
                     }
                     data

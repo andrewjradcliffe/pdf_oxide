@@ -4490,10 +4490,13 @@ impl TextExtractor {
                         Ok(data) => {
                             // Cache if under 50MB total
                             const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
-                            if doc.xobject_stream_cache_bytes.get() + data.len() <= MAX_STREAM_CACHE_BYTES
+                            if doc.xobject_stream_cache_bytes.get() + data.len()
+                                <= MAX_STREAM_CACHE_BYTES
                             {
-                                doc.xobject_stream_cache_bytes.set(doc.xobject_stream_cache_bytes.get() + data.len());
-                                doc.xobject_stream_cache.borrow_mut()
+                                doc.xobject_stream_cache_bytes
+                                    .set(doc.xobject_stream_cache_bytes.get() + data.len());
+                                doc.xobject_stream_cache
+                                    .borrow_mut()
                                     .insert(xobject_ref, std::sync::Arc::new(data.clone()));
                             }
                             data
@@ -4588,7 +4591,9 @@ impl TextExtractor {
                     } else {
                         None
                     };
-                    doc.xobject_spans_cache.borrow_mut().insert(xobject_ref, new_spans);
+                    doc.xobject_spans_cache
+                        .borrow_mut()
+                        .insert(xobject_ref, new_spans);
                 }
 
                 // Restore fonts, resources, and XObject cache only if saved
