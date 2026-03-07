@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Run stub_gen binary with PATH set so the Python DLL is found on Windows.
+"""Run stub_gen binary with env set so the Python shared library is found.
 
-The Rust binary (stub_gen.exe) links against the Python shared library; on
-Windows it must find e.g. python3xx.dll. This script prepends all likely
-Python DLL locations to PATH, then runs cargo so the child stub_gen.exe
-can load the DLL.
+- Windows: PATH is prepended with Python dirs so stub_gen.exe finds python3xx.dll.
+- Linux: LD_LIBRARY_PATH is set so stub_gen finds libpython3.x.so.
+- macOS: DYLD_LIBRARY_PATH is set so stub_gen finds the Python dylib.
 """
 
 from __future__ import annotations
@@ -12,35 +11,49 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
-def _dll_paths() -> list[str]:
-    """Paths that might contain the Python DLL (python3xx.dll), in search order."""
+def _lib_paths() -> list[str]:
+    """Paths that might contain the Python shared library (DLL / .so / dylib)."""
     seen: set[str] = set()
     out: list[str] = []
     base_exe = getattr(sys, "base_executable", sys.executable)
-    for p in (
-        os.path.dirname(os.path.abspath(sys.executable)),
-        os.path.dirname(os.path.abspath(base_exe)),
-        os.path.abspath(sys.base_prefix),
-        os.path.join(sys.base_prefix, "Scripts"),
-        os.path.join(sys.base_prefix, "Library", "bin"),
-    ):
-        if p and os.path.isdir(p) and p not in seen:
-            seen.add(p)
-            out.append(p)
+    base = Path(sys.base_prefix).resolve()
+    candidates = [
+        Path(sys.executable).resolve().parent,
+        Path(base_exe).resolve().parent,
+        base,
+        base / "lib",
+        base / "lib64",
+        base / "Scripts",
+        base / "Library" / "bin",
+    ]
+    for p in candidates:
+        if not p.is_dir():
+            continue
+        s = str(p)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
     return out
 
 
 def main() -> int:
-    # Project root (directory with Cargo.toml / pyproject.toml). stub_gen.exe expects CARGO_MANIFEST_DIR.
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Project root (directory with Cargo.toml / pyproject.toml). stub_gen expects CARGO_MANIFEST_DIR.
+    project_root = Path(__file__).resolve().parent.parent
     os.chdir(project_root)
 
-    extra = os.pathsep.join(_dll_paths())
+    extra = os.pathsep.join(_lib_paths())
     env = os.environ.copy()
     env["PATH"] = extra + os.pathsep + env.get("PATH", "")
-    env["CARGO_MANIFEST_DIR"] = project_root
+    env["CARGO_MANIFEST_DIR"] = str(project_root)
+    # Linux: so the stub_gen binary can load libpython3.x.so
+    if sys.platform.startswith("linux"):
+        env["LD_LIBRARY_PATH"] = extra + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+    # macOS: so the stub_gen binary can load the Python dylib
+    if sys.platform == "darwin":
+        env["DYLD_LIBRARY_PATH"] = extra + os.pathsep + env.get("DYLD_LIBRARY_PATH", "")
 
     # Build first (cargo run may not pass env to the exe on Windows).
     # On failure, do not run stub_gen; return the build exit code.
@@ -53,10 +66,10 @@ def main() -> int:
 
     # Run the exe directly so it definitely gets our PATH and CARGO_MANIFEST_DIR.
     exe_name = "stub_gen.exe" if sys.platform == "win32" else "stub_gen"
-    exe = os.path.join("target", "debug", exe_name)
-    if not os.path.isfile(exe):
-        exe = os.path.join("target", "release", exe_name)
-    return subprocess.run([exe], env=env, cwd=project_root).returncode
+    exe = project_root / "target" / "debug" / exe_name
+    if not exe.is_file():
+        exe = project_root / "target" / "release" / exe_name
+    return subprocess.run([str(exe)], env=env, cwd=project_root).returncode
 
 
 if __name__ == "__main__":
