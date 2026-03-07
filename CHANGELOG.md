@@ -2,6 +2,12 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **Fixed segfault in nested Form XObject text extraction** — Resolved aliased `&mut` references during recursive XObject processing using interior mutability (`RefCell`/`Cell`).
+
 ## [0.3.15] - 2026-03-06
 > Header & Footer Management, Multi-Column Stability, and Font Fixes
 
