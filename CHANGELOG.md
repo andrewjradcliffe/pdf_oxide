@@ -2,7 +2,6 @@
 
 All notable changes to PDFOxide are documented here.
 
-<<<<<<< HEAD
 ## [0.3.16] - 2026-03-07
 > Advanced Visual Table Detection and Automated Python Stubs
 
@@ -14,7 +13,9 @@ All notable changes to PDFOxide are documented here.
     - **Visual Spans:** Identifies colspans and rowspans by analyzing the absence of internal grid lines and text-overflow signals.
     - **Visual Headers:** Heuristically identifies hierarchical (multi-row) header rows.
 - **Professional ASCII Tables:** Added high-quality ASCII table formatting for plain text output, featuring automatic multiline text wrapping and balanced column alignment.
-- **Auto-generated Python type stubs** (#220) — Added `pyo3-stub-gen` to automatically generate `.pyi` stub files from Rust PyO3 bindings, ensuring Python IDEs always have up-to-date type information.
+- **Auto-generated Python type stubs** (#220) — Integrated automated `.pyi` stub generation using **mypy's stubgen** in the CI pipeline, ensuring Python IDEs always have up-to-date type information for the Rust bindings.
+- **Python `PdfDocument` path-like** — `PdfDocument` now accepts `pathlib.Path` (or any path-like object) in addition to `str` for the file path.
+- **Python `PdfDocument` context manager** — `PdfDocument` supports the context manager protocol: use `with PdfDocument(path) as doc:` for scoped usage; exceptions inside the block are propagated (not swallowed).
 - **Enabled by Default:** Table extraction is now active by default in all Markdown, HTML, and Plain Text conversions.
 - **Robust Geometry:** Updated `Rect` primitive to handle negative dimensions and coordinate normalization natively.
 
@@ -26,16 +27,7 @@ All notable changes to PDFOxide are documented here.
 
 ### 🏆 Community Contributors
 
-🥇 **@monchin** — Thank you for implementing automated Python stub generation (#220)! This significantly improves the developer experience for Python users by providing consistent, IDE-friendly type hints automatically synced with our Rust core. Outstanding contribution! 🚀
-||||||| 8f53f8b
-=======
-## [Unreleased]
-
-### Features
-
-- **Python `PdfDocument` path-like** — `PdfDocument` now accepts `pathlib.Path` (or any path-like object) in addition to `str` for the file path.
-- **Python `PdfDocument` context manager** — `PdfDocument` supports the context manager protocol: use `with PdfDocument(path) as doc:` for scoped usage; exceptions inside the block are propagated (not swallowed).
->>>>>>> ebf0c3167254419adae1e393c3b41054b12f3ae0
+🥇 **@monchin** — Thank you for the fantastic initiative on automated stub generation (#220)! We've integrated this into the v0.3.16 release using **mypy's stubgen** in our CI pipeline. This significantly improves the developer experience for Python users by providing consistent, IDE-friendly type hints while maintaining full compatibility. Outstanding contribution! 🚀
 
 ## [0.3.15] - 2026-03-06
 > Header & Footer Management, Multi-Column Stability, and Font Fixes
