@@ -104,7 +104,7 @@ pub fn detect_tables_from_spans(
     }
 
     let columns = detect_columns(spans, config.column_tolerance);
-    if columns.len() < config.min_table_columns || columns.len() > config.max_table_columns {
+    if columns.len() < config.min_table_columns.max(2) || columns.len() > config.max_table_columns {
         return Vec::new();
     }
 
