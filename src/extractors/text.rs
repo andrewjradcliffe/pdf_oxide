@@ -4419,7 +4419,7 @@ impl TextExtractor {
         // Span result cache: reuse extracted spans from self-contained Form XObjects.
         // Only works for XObjects with own /Resources (font context is self-contained).
         if self.extract_spans {
-            let cached_spans = doc.xobject_spans_cache.borrow().get(&xobject_ref).cloned();
+            let cached_spans = { doc.xobject_spans_cache.borrow().get(&xobject_ref).cloned() };
             if let Some(cached_spans) = cached_spans {
                 if let Some(spans) = cached_spans {
                     self.spans.extend(spans.iter().cloned());
@@ -4482,7 +4482,8 @@ impl TextExtractor {
 
                 // Decode the stream — check cache first to avoid repeated FlateDecode.
                 self.xobject_decode_count += 1;
-                let cached_stream = doc.xobject_stream_cache.borrow().get(&xobject_ref).cloned();
+                let cached_stream =
+                    { doc.xobject_stream_cache.borrow().get(&xobject_ref).cloned() };
                 let stream_data = if let Some(cached) = cached_stream {
                     cached.as_ref().clone()
                 } else {

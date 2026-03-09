@@ -2,6 +2,22 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.17] - 2026-03-08
+> Stable Recursion and Refined Table Heuristics
+
+### Features
+
+- **Refined Table Detection** — The spatial table detector now requires at least **2 columns** to identify a region as a table. This significantly reduces false positives where single-column lists or bullet points were incorrectly wrapped in ASCII boxes.
+- **Optimized Text Extraction** — Refactored the internal extraction pipeline to eliminate redundant work when processing Tagged PDFs. The structure tree and page spans are now extracted once and shared across the detection and rendering phases.
+
+### Bug Fixes
+
+- **Resolved `RefCell` already borrowed panic** (#237) — Fixed a critical reentrancy issue where recursive Form XObject processing (e.g., extracting images from nested forms) could trigger a runtime panic. Replaced long-lived borrows with scoped, tiered cache access using Rust best practices. (Reported by **@marph91**)
+
+### 🏆 Community Contributors
+
+🥇 **@marph91** — Thank you for identifying the complex `RefCell` borrow conflict in nested image extraction (#237). This report led to a comprehensive safety audit of our interior mutability patterns and a more robust, recursion-safe caching architecture! 🚀
+
 ## [0.3.16] - 2026-03-08
 > Advanced Visual Table Detection and Automated Python Stubs
 

@@ -188,7 +188,8 @@ pub struct PdfDocument {
         RefCell<HashMap<ObjectRef, Option<Vec<crate::layout::TextSpan>>>>,
     /// Cache of extracted images from Form XObjects (keyed by ObjectRef).
     /// Images are stored without CTM applied — caller applies its own CTM.
-    pub(crate) form_xobject_images_cache: HashMap<ObjectRef, Vec<crate::extractors::PdfImage>>,
+    pub(crate) form_xobject_images_cache:
+        RefCell<HashMap<ObjectRef, Vec<crate::extractors::PdfImage>>>,
     /// Regions marked for erasure per page
     pub(crate) erase_regions: HashMap<usize, Vec<crate::geometry::Rect>>,
 }
@@ -436,7 +437,7 @@ impl PdfDocument {
             xobject_stream_cache: RefCell::new(HashMap::new()),
             xobject_stream_cache_bytes: Cell::new(0),
             xobject_spans_cache: RefCell::new(HashMap::new()),
-            form_xobject_images_cache: HashMap::new(),
+            form_xobject_images_cache: RefCell::new(HashMap::new()),
             erase_regions: HashMap::new(),
         };
 
@@ -867,7 +868,8 @@ impl PdfDocument {
         }
 
         // Check cache first
-        if let Some(cached) = self.object_cache.borrow().get(&obj_ref).cloned() {
+        let cached_opt = self.object_cache.borrow().get(&obj_ref).cloned();
+        if let Some(cached) = cached_opt {
             return Ok(cached);
         }
 
@@ -1098,12 +1100,15 @@ impl PdfDocument {
     /// For compressed objects or on any error, returns true (conservative — will load fully).
     pub fn is_form_xobject(&self, obj_ref: ObjectRef) -> bool {
         // Check negative cache first (known non-Form XObjects)
-        if self.image_xobject_cache.borrow().contains(&obj_ref) {
-            return false;
+        {
+            if self.image_xobject_cache.borrow().contains(&obj_ref) {
+                return false;
+            }
         }
 
         // If already in object cache, check directly
-        if let Some(cached) = self.object_cache.borrow().get(&obj_ref).cloned() {
+        let cached_opt = self.object_cache.borrow().get(&obj_ref).cloned();
+        if let Some(cached) = cached_opt {
             let is_form = cached
                 .as_dict()
                 .and_then(|d| d.get("Subtype"))
@@ -6711,8 +6716,8 @@ impl PdfDocument {
             // Layer 2: Check font set cache for the /Font dictionary.
             // Pages sharing the same /Font dict skip the entire per-font loop.
             if let Some(font_dict_ref) = font_dict_ref {
-                if let Some(cached_set) = self.font_set_cache.borrow().get(&font_dict_ref).cloned()
-                {
+                let cached_set_opt = self.font_set_cache.borrow().get(&font_dict_ref).cloned();
+                if let Some(cached_set) = cached_set_opt {
                     for (name, font_arc) in &cached_set {
                         extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
                     }
@@ -6745,12 +6750,12 @@ impl PdfDocument {
                     hasher.finish()
                 };
 
-                if let Some(cached_set) = self
+                let cached_fingerprint_opt = self
                     .font_fingerprint_cache
                     .borrow()
                     .get(&fingerprint)
-                    .cloned()
-                {
+                    .cloned();
+                if let Some(cached_set) = cached_fingerprint_opt {
                     for (name, font_arc) in &cached_set {
                         extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
                     }
@@ -6772,9 +6777,8 @@ impl PdfDocument {
                     hasher.finish()
                 };
 
-                if let Some((cached_set, _check_name, _check_hash)) =
-                    self.font_name_set_cache.borrow().get(&name_hash).cloned()
-                {
+                let cached_name_set = self.font_name_set_cache.borrow().get(&name_hash).cloned();
+                if let Some((cached_set, _check_name, _check_hash)) = cached_name_set {
                     // Layer 4: Same font names within a document virtually always map
                     // to the same underlying fonts. Trust the name-based cache to avoid
                     // expensive load_object calls for spot-check verification.
@@ -6798,7 +6802,8 @@ impl PdfDocument {
                 for (name, font_obj) in sorted_font_entries {
                     // If font is a reference, check per-font cache first
                     if let Some(font_ref) = font_obj.as_reference() {
-                        if let Some(cached) = self.font_cache.borrow().get(&font_ref).cloned() {
+                        let cached_font_opt = self.font_cache.borrow().get(&font_ref).cloned();
+                        if let Some(cached) = cached_font_opt {
                             extractor.add_font_shared(name.clone(), cached);
                             continue;
                         }
@@ -6815,9 +6820,9 @@ impl PdfDocument {
 
                         // Layer 5: Per-font identity cache — skip from_dict when a
                         // structurally identical font was already parsed elsewhere.
-                        if let Some(cached) =
-                            self.font_identity_cache.borrow().get(&id_hash).cloned()
-                        {
+                        let cached_identity_opt =
+                            self.font_identity_cache.borrow().get(&id_hash).cloned();
+                        if let Some(cached) = cached_identity_opt {
                             self.font_cache
                                 .borrow_mut()
                                 .insert(font_ref, Arc::clone(&cached));
@@ -8162,19 +8167,22 @@ impl PdfDocument {
             return Ok(Vec::new());
         }
 
-        // Check image result cache — images stored with Form's own Matrix only
-        if let Some(cached_images) = self.form_xobject_images_cache.get(&xobject_ref) {
-            let images = cached_images
-                .iter()
-                .map(|img| {
-                    let mut cloned = img.clone();
-                    if let Some(rect) = cloned.bbox() {
-                        cloned.set_bbox(self.transform_bbox_with_ctm(rect, parent_ctm));
-                    }
-                    cloned
-                })
-                .collect();
-            return Ok(images);
+        // Check image result cache — images stored with Form's own Matrix only.
+        // Scope the borrow to ensure it's dropped before potential recursion.
+        {
+            if let Some(cached_images) = self.form_xobject_images_cache.borrow().get(&xobject_ref) {
+                let images = cached_images
+                    .iter()
+                    .map(|img| {
+                        let mut cloned = img.clone();
+                        if let Some(rect) = cloned.bbox() {
+                            cloned.set_bbox(self.transform_bbox_with_ctm(rect, parent_ctm));
+                        }
+                        cloned
+                    })
+                    .collect();
+                return Ok(images);
+            }
         }
 
         xobject_stack.push(xobject_ref);
@@ -8220,12 +8228,12 @@ impl PdfDocument {
         };
 
         // Decode form stream — check cache first to avoid repeated decompression
-        let stream_data = if let Some(cached) = self
+        let cached_stream = self
             .xobject_stream_cache
             .borrow()
             .get(&xobject_ref)
-            .cloned()
-        {
+            .cloned();
+        let stream_data = if let Some(cached) = cached_stream {
             cached.as_ref().clone()
         } else {
             match self.decode_stream_with_encryption(xobject, xobject_ref) {
@@ -8322,6 +8330,7 @@ impl PdfDocument {
 
         // Cache the raw images (with Form's own Matrix applied, but no parent CTM)
         self.form_xobject_images_cache
+            .borrow_mut()
             .insert(xobject_ref, raw_images.clone());
 
         // Apply parent_ctm to produce final images for this call
