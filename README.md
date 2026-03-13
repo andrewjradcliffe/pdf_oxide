@@ -150,10 +150,16 @@ for w in words:
     # Access individual characters in the word
     # print(w.chars[0].font_name)
 
+# Optional: override the adaptive word gap threshold (in PDF points)
+words = doc.extract_words(0, word_gap_threshold=2.5)
+
 # 3. Line-level extraction (v0.3.14)
 lines = doc.extract_text_lines(0)
 for line in lines:
     print(f"Line: {line.text}")
+
+# Optional: override word and/or line gap thresholds (in PDF points)
+lines = doc.extract_text_lines(0, word_gap_threshold=2.5, line_gap_threshold=4.0)
 
 # 4. Table extraction (v0.3.14)
 tables = doc.extract_tables(0)

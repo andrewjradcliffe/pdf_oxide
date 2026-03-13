@@ -352,10 +352,17 @@ for w in words:
     # Access character metadata for the word
     # print(w.chars[0].font_name)
 
+# Optional: override the adaptive word gap threshold (in PDF points).
+# Smaller values split more aggressively; useful for dense forms.
+words = doc.extract_words(0, word_gap_threshold=2.5)
+
 # 4. Line-level extraction (v0.3.14)
 lines = doc.extract_text_lines(0)
 for line in lines:
     print(f"Line: {line.text}")
+
+# Optional: override word and/or line gap thresholds (in PDF points).
+lines = doc.extract_text_lines(0, word_gap_threshold=2.5, line_gap_threshold=4.0)
 
 # 5. Image metadata
 images = doc.extract_images(0)
