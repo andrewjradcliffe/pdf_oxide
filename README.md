@@ -161,6 +161,10 @@ for line in lines:
 # Optional: override word and/or line gap thresholds (in PDF points)
 lines = doc.extract_text_lines(0, word_gap_threshold=2.5, line_gap_threshold=4.0)
 
+# Inspect the adaptive thresholds before overriding
+params = doc.page_layout_params(0)
+print(f"word gap: {params.word_gap_threshold:.1f}, line gap: {params.line_gap_threshold:.1f}")
+
 # 4. Table extraction (v0.3.14)
 tables = doc.extract_tables(0)
 for table in tables:

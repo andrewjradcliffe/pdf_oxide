@@ -364,6 +364,16 @@ for line in lines:
 # Optional: override word and/or line gap thresholds (in PDF points).
 lines = doc.extract_text_lines(0, word_gap_threshold=2.5, line_gap_threshold=4.0)
 
+# 5. Inspect computed layout params before overriding
+params = doc.page_layout_params(0)
+print(f"Adaptive word gap: {params.word_gap_threshold:.1f}pt")
+print(f"Adaptive line gap: {params.line_gap_threshold:.1f}pt")
+
+# 6. Pre-tuned extraction profiles for different document types
+from pdf_oxide import ExtractionProfile
+profile = ExtractionProfile.form()
+print(f"Profile: {profile.name}, word_margin_ratio={profile.word_margin_ratio}")
+
 # 5. Image metadata
 images = doc.extract_images(0)
 for img in images:

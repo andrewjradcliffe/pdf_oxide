@@ -68,6 +68,8 @@ from .pdf_oxide import (
     PdfDocument,
     RadialGradient,
     # Extraction
+    ExtractionProfile,
+    LayoutParams,
     TextSpan,
     disable_logging,
     get_log_level,
@@ -97,6 +99,8 @@ __all__ = [
     "Footer",
     "PageTemplate",
     # Extraction
+    "ExtractionProfile",
+    "LayoutParams",
     "TextSpan",
     # OCR
     "OcrEngine",
