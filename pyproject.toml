@@ -185,5 +185,5 @@ python = "./.venv"
 [tool.pdm.scripts]
 fmt = {composite = ["cargo fmt", "ruff check . --select I --fix", "ruff format ."]}
 lint = {composite = ["cargo check", "cargo clippy -- -D warnings", "ruff check . --fix", "ty check ."]}
-# Generate .pyi from Rust (mypy stubgen). Use: pdm run stub_gen
-stub_gen = "uv run stubgen -p pdf_oxide -o python"
+# Generate .pyi from Rust (Rylai). Use: pdm run stub_gen
+stub_gen = "uvx rylai -o python/pdf_oxide/"

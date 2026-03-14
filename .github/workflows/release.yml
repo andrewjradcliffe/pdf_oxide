@@ -283,10 +283,7 @@ jobs:
 
       # Generate .pyi stubs automatically using mypy stubgen
       - name: Generate type stubs
-        run: |
-          uv run pip install mypy maturin
-          uv run maturin develop --features python
-          uv run stubgen -p pdf_oxide -o python
+        run: uvx rylai -o python/pdf_oxide/
 
       - name: Build wheels
         run: maturin build --release --features python --target ${{ matrix.target }} --out dist

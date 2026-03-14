@@ -160,24 +160,20 @@ cargo flamegraph --bench benchmark_name
 
 ### Python type stubs (.pyi)
 
-Type stubs for the Python bindings are generated via [mypy stubgen](https://mypy.readthedocs.io/en/stable/stubgen.html). The generator introspects the compiled Rust extension to create the initial `.pyi` structure.
+Type stubs for the Python bindings are generated via [Rylai](https://github.com/monchin/Rylai), which parses PyO3-annotated Rust source and emits `.pyi` files statically (no compilation required).
 
 **Generate stubs locally:**
 
+Requires [uv](https://docs.astral.sh/uv/) (e.g. `pip install uv` or install from astral.sh). Then:
+
 ```bash
-# From project root (uses pdm script)
+# From project root (uses pdm script; runs uvx rylai -o python/pdf_oxide/)
 pdm run stub_gen
 ```
 
-Or run the wrapper script directly (same effect, works from any directory that has `scripts/`):
+Optional config is in `rylai.toml` at the crate root (e.g. `python_version`, `[features]`). Output is written under `python/pdf_oxide/`. These stubs are bundled into the wheel by maturin.
 
-```bash
-python scripts/run_stub_gen.py
-```
-
-The script builds the `stub_gen` binary (`cargo build --bin stub_gen --features python,office`), then runs it. Output is written under `python/` according to `[tool.maturin]` in `pyproject.toml` (e.g. `python/pdf_oxide/pdf_oxide/__init__.pyi` for module `pdf_oxide.pdf_oxide`). These stubs are bundled into the wheel by maturin.
-
-**In CI:** The release workflow (`.github/workflows/release.yml`) runs “Generate .pyi from Rust” before building wheels, so each release’s wheels include up-to-date type stubs.
+**In CI:** The Python workflow (`.github/workflows/python.yml`) and the release workflow (`.github/workflows/release.yml`) run “Generate .pyi from Rust” before building wheels, so each release’s wheels include up-to-date type stubs.
 
 ### Editor Setup
 

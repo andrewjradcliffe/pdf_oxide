@@ -2,6 +2,12 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **Python type stubs** — Switched from mypy stubgen to [Rylai](https://github.com/monchin/Rylai) for generating `.pyi` from PyO3 Rust source statically (no compilation). Local command: `pdm run stub_gen` (runs `uvx rylai -o python/pdf_oxide/`). Optional config in `rylai.toml` at the crate root. CI and release workflows updated to use Rylai.
+
 ## [0.3.17] - 2026-03-08
 > Stable Recursion and Refined Table Heuristics
 
