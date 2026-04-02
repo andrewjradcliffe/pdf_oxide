@@ -3600,7 +3600,9 @@ impl TextExtractor {
                                     }
 
                                     let state_mut = self.state_stack.current_mut();
-                                    state_mut.text_matrix.e += tx;
+                                    let tm = state_mut.text_matrix;
+                                    state_mut.text_matrix.e += tx * tm.a;
+                                    state_mut.text_matrix.f += tx * tm.b;
                                 },
                             }
                         }
@@ -4526,6 +4528,33 @@ impl TextExtractor {
                     return Ok(());
                 }
 
+                // Parse /Matrix from Form XObject dict (default: identity per ISO 32000-1 §8.10.1)
+                let form_matrix = if let Some(Object::Array(arr)) = xobject_dict.get("Matrix") {
+                    let get_f32 = |i: usize| -> f32 {
+                        match arr.get(i) {
+                            Some(Object::Real(v)) => *v as f32,
+                            Some(Object::Integer(v)) => *v as f32,
+                            _ => {
+                                if i == 0 || i == 3 {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            },
+                        }
+                    };
+                    Matrix {
+                        a: get_f32(0),
+                        b: get_f32(1),
+                        c: get_f32(2),
+                        d: get_f32(3),
+                        e: get_f32(4),
+                        f: get_f32(5),
+                    }
+                } else {
+                    Matrix::identity()
+                };
+
                 // Only save/restore fonts+resources when XObject has its own Resources.
                 // Avoids expensive HashMap clone for XObjects that inherit page fonts.
                 let has_own_resources = xobject_dict.contains_key("Resources");
@@ -4571,6 +4600,13 @@ impl TextExtractor {
                 // Track span count for result caching
                 let spans_before = self.spans.len();
 
+                // Save graphics state (implicit q per ISO 32000-1 §8.10.1)
+                self.state_stack.save();
+
+                // Concatenate Form XObject /Matrix with CTM
+                let state = self.state_stack.current_mut();
+                state.ctm = form_matrix.multiply(&state.ctm);
+
                 // Streaming parse+execute: avoids allocating Vec<Operator>
                 self.xobject_depth += 1;
                 let parse_result =
@@ -4596,6 +4632,17 @@ impl TextExtractor {
                         .borrow_mut()
                         .insert(xobject_ref, new_spans);
                 }
+
+                // Restore graphics state (implicit Q per ISO 32000-1 §8.10.1)
+                self.state_stack.restore();
+                // Sync cached font with restored state
+                self.cached_current_font = self
+                    .state_stack
+                    .current()
+                    .font_name
+                    .as_ref()
+                    .and_then(|name| self.fonts.get(name))
+                    .cloned();
 
                 // Restore fonts, resources, and XObject cache only if saved
                 if let Some(fonts) = saved_fonts {
@@ -5325,12 +5372,12 @@ impl TextExtractor {
             w_sum
         };
 
-        // Update text matrix position
+        // Update text matrix position per ISO 32000-1:2008 §9.4.4:
+        // Tm_new = [1 0 0 1 tx 0] × Tm_old, where tx = total_width (text-space displacement)
         let state = self.state_stack.current_mut();
         let text_matrix = state.text_matrix;
-        let advance = total_width / text_matrix.d.abs();
-        state.text_matrix.e += advance * text_matrix.a;
-        state.text_matrix.f += advance * text_matrix.b;
+        state.text_matrix.e += total_width * text_matrix.a;
+        state.text_matrix.f += total_width * text_matrix.b;
 
         Ok(total_width)
     }
@@ -5434,12 +5481,11 @@ impl TextExtractor {
 
         buffer.accumulated_width += total_width;
 
-        // Update text matrix position
+        // Update text matrix position per ISO 32000-1:2008 §9.4.4
         let state = self.state_stack.current_mut();
         let text_matrix = state.text_matrix;
-        let advance = total_width / text_matrix.d.abs();
-        state.text_matrix.e += advance * text_matrix.a;
-        state.text_matrix.f += advance * text_matrix.b;
+        state.text_matrix.e += total_width * text_matrix.a;
+        state.text_matrix.f += total_width * text_matrix.b;
 
         Ok(())
     }
@@ -5536,9 +5582,8 @@ impl TextExtractor {
 
         let state = self.state_stack.current_mut();
         let text_matrix = state.text_matrix;
-        let advance = total_width / text_matrix.d.abs();
-        state.text_matrix.e += advance * text_matrix.a;
-        state.text_matrix.f += advance * text_matrix.b;
+        state.text_matrix.e += total_width * text_matrix.a;
+        state.text_matrix.f += total_width * text_matrix.b;
 
         Ok(())
     }
@@ -5612,11 +5657,10 @@ impl TextExtractor {
 
         self.spans.push(span);
 
-        // Advance position
+        // Advance position per ISO 32000-1:2008 §9.4.4
         let state = self.state_stack.current_mut();
-        let advance = space_width / text_matrix.d.abs();
-        state.text_matrix.e += advance * text_matrix.a;
-        state.text_matrix.f += advance * text_matrix.b;
+        state.text_matrix.e += space_width * text_matrix.a;
+        state.text_matrix.f += space_width * text_matrix.b;
 
         Ok(())
     }
@@ -5627,13 +5671,15 @@ impl TextExtractor {
         let font_size = state.font_size;
         let horizontal_scaling = state.horizontal_scaling;
 
-        // Calculate horizontal displacement per PDF spec
+        // Calculate horizontal displacement per PDF spec §9.4.4
         // tx = -offset / 1000.0 * font_size * horizontal_scaling / 100.0
         let tx = -offset / 1000.0 * font_size * horizontal_scaling / 100.0;
 
-        // Update text matrix position
+        // Update text matrix: Tm_new = [1 0 0 1 tx 0] × Tm_old
         let state = self.state_stack.current_mut();
-        state.text_matrix.e += tx;
+        let text_matrix = state.text_matrix;
+        state.text_matrix.e += tx * text_matrix.a;
+        state.text_matrix.f += tx * text_matrix.b;
 
         Ok(())
     }
@@ -5863,9 +5909,11 @@ impl TextExtractor {
                 tx += word_space * hs_factor;
             }
 
-            // Update text matrix in current state
+            // Update text matrix in current state per ISO 32000-1:2008 §9.4.4
             let state_mut = self.state_stack.current_mut();
-            state_mut.text_matrix.e += tx;
+            let tm = state_mut.text_matrix;
+            state_mut.text_matrix.e += tx * tm.a;
+            state_mut.text_matrix.f += tx * tm.b;
         }
 
         Ok(())
