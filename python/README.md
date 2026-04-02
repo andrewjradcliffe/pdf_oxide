@@ -81,13 +81,13 @@ pdm lint
 
 ## Type stubs (.pyi)
 
-Type stubs are generated from the Rust PyO3 bindings with [pyo3-stub-gen](https://crates.io/crates/pyo3-stub-gen). After changing the Python API in `src/python.rs`, regenerate stubs so IDEs and type checkers see the correct signatures:
+Type stubs are generated from the Rust PyO3 source with [Rylai](https://github.com/monchin/Rylai) (statically, without compilation). After changing the Python API in `src/python.rs`, regenerate stubs so IDEs and type checkers see the correct signatures:
 
 ```bash
 pdm run stub_gen
 ```
 
-Output is written under `python/pdf_oxide/` (e.g. `pdf_oxide/pdf_oxide/__init__.pyi`) and is bundled into the wheel by maturin. The release workflow regenerates stubs automatically before building wheels.
+This runs `uvx rylai -o python/pdf_oxide/`. You need [uv](https://docs.astral.sh/uv/) installed (e.g. `pip install uv` or install from astral.sh). Optional config is in `rylai.toml` at the project root. Output is written under `python/pdf_oxide/` and is bundled into the wheel by maturin. The CI and release workflows regenerate stubs automatically before building wheels.
 
 ## API Documentation
 

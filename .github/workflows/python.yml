@@ -109,10 +109,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Generate .pyi from Rust
-        run: |
-          uv run pip install mypy maturin
-          uv run maturin develop --features python
-          uv run stubgen -p pdf_oxide -o python
+        run: uvx rylai -o python/pdf_oxide/
 
       - name: Run Ruff
         run: uv run ruff check . --fix

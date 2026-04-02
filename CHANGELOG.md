@@ -6,7 +6,11 @@ All notable changes to PDFOxide are documented here.
 
 ### Bug Fixes
 
-- **Fixed process abort on degenerate CTM coordinates** — A malformed CTM could place text spans at ~10¹⁴ PDF points, causing XY-cut to attempt a multi-terabyte allocation and abort via `handle_alloc_error`. Projection functions now return `None` when the computed bin count exceeds `MAX_PROJECTION_SIZE`, safely skipping the split instead of crashing.
+- **Fixed process abort on degenerate CTM coordinates** — A malformed CTM could place text spans at extreme coordinates, causing allocation abort. Projection functions now safely skip the split instead of crashing.
+
+### Changed
+
+- **Python type stubs** — Switched from mypy stubgen to [Rylai](https://github.com/monchin/Rylai) for generating `.pyi` from PyO3 Rust source statically (no compilation). CI and release workflows updated.
 
 ## [0.3.17] - 2026-03-08
 > Stable Recursion and Refined Table Heuristics
