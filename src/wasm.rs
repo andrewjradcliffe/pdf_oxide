@@ -84,16 +84,23 @@ impl WasmPdfDocument {
 
     /// Load a PDF document from raw bytes.
     ///
-    /// @param data - The PDF file contents as a Uint8Array
+    /// @param data - PDF file contents as Uint8Array
+    /// @param password - Optional password for encrypted PDFs
     /// @throws Error if the PDF is invalid or cannot be parsed
     #[wasm_bindgen(constructor)]
-    pub fn new(data: &[u8]) -> Result<WasmPdfDocument, JsValue> {
+    pub fn new(data: &[u8], password: Option<String>) -> Result<WasmPdfDocument, JsValue> {
         #[cfg(feature = "wasm")]
         console_error_panic_hook::set_once();
 
         let bytes = data.to_vec();
-        let inner = PdfDocument::from_bytes(bytes.clone())
+        let mut inner = PdfDocument::from_bytes(bytes.clone())
             .map_err(|e| JsValue::from_str(&format!("Failed to open PDF: {}", e)))?;
+
+        if let Some(pw) = password {
+            inner
+                .authenticate(pw.as_bytes())
+                .map_err(|e| JsValue::from_str(&format!("Authentication failed: {}", e)))?;
+        }
 
         Ok(WasmPdfDocument {
             inner: Arc::new(Mutex::new(inner)),
@@ -2339,6 +2346,15 @@ impl WasmPdfDocument {
     /// Save all edits and return the resulting PDF as bytes.
     ///
     /// @returns Uint8Array containing the modified PDF
+    #[wasm_bindgen(js_name = "save")]
+    pub fn save(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.save_to_bytes()
+    }
+
+    /// Save the modified PDF and return as bytes.
+    /// `saveToBytes()` is the original method; `save()` is a convenience alias.
+    ///
+    /// @returns Uint8Array containing the modified PDF
     #[wasm_bindgen(js_name = "saveToBytes")]
     pub fn save_to_bytes(&mut self) -> Result<Vec<u8>, JsValue> {
         let editor_arc = self.ensure_editor()?;
@@ -2387,6 +2403,112 @@ impl WasmPdfDocument {
             .save_to_bytes_with_options(options)
             .map_err(|e| JsValue::from_str(&format!("Failed to save encrypted PDF: {}", e)))
     }
+
+    // ========================================================================
+    // Group 9: Validation — PDF/A, PDF/UA, PDF/X
+    // ========================================================================
+
+    /// Validate PDF/A compliance. Level: "1b", "2b", etc.
+    #[wasm_bindgen(js_name = "validatePdfA")]
+    pub fn validate_pdf_a(&mut self, level: &str) -> Result<JsValue, JsValue> {
+        use crate::compliance::pdf_a::validate_pdf_a;
+        use crate::compliance::types::PdfALevel;
+        let pdf_level = match level {
+            "1a" => PdfALevel::A1a,
+            "1b" => PdfALevel::A1b,
+            "2a" => PdfALevel::A2a,
+            "2b" => PdfALevel::A2b,
+            "2u" => PdfALevel::A2u,
+            "3a" => PdfALevel::A3a,
+            "3b" => PdfALevel::A3b,
+            "3u" => PdfALevel::A3u,
+            _ => return Err(JsValue::from_str(&format!("Unknown PDF/A level: {}", level))),
+        };
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Lock failed"))?;
+        let result =
+            validate_pdf_a(&mut inner, pdf_level).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let errors: Vec<String> = result.errors.iter().map(|e| e.to_string()).collect();
+        let warnings: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+        serde_wasm_bindgen::to_value(&serde_json::json!({
+            "valid": errors.is_empty(),
+            "level": level,
+            "errors": errors,
+            "warnings": warnings,
+        }))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    // ========================================================================
+    // Group 10: Annotations
+    // Note: add_link, add_highlight, add_note require editor API rework
+    // to properly support PdfPage annotations. Tracked for future release.
+
+    // ========================================================================
+    // Group 11: Page Operations
+    // ========================================================================
+
+    /// Delete a page by index (0-based).
+    #[wasm_bindgen(js_name = "deletePage")]
+    pub fn delete_page(&mut self, index: usize) -> Result<(), JsValue> {
+        use crate::editor::EditableDocument;
+        let bytes = self.raw_bytes.to_vec();
+        let mut editor = crate::editor::DocumentEditor::from_bytes(bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        editor
+            .remove_page(index)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let new_bytes = editor
+            .save_to_bytes()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let new_doc = crate::document::PdfDocument::from_bytes(new_bytes.clone())
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Lock failed"))?;
+        *inner = new_doc;
+        self.raw_bytes = Arc::new(new_bytes);
+        Ok(())
+    }
+
+    /// Extract specific pages to a new PDF (returns bytes).
+    #[wasm_bindgen(js_name = "extractPages")]
+    pub fn extract_pages(&mut self, pages: Vec<usize>) -> Result<Vec<u8>, JsValue> {
+        use crate::editor::EditableDocument;
+        let bytes = self.raw_bytes.to_vec();
+        let mut editor = crate::editor::DocumentEditor::from_bytes(bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        // Keep only the requested pages by removing others in reverse order
+        let page_count = editor
+            .page_count()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        for i in (0..page_count).rev() {
+            if !pages.contains(&i) {
+                let _ = editor.remove_page(i);
+            }
+        }
+        editor
+            .save_to_bytes()
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Create a flattened PDF where each page is rendered as an image.
+    /// Burns in all annotations, form fields, and overlays.
+    /// Returns the flattened PDF as bytes.
+    #[cfg(feature = "rendering")]
+    #[wasm_bindgen(js_name = "flattenToImages")]
+    pub fn flatten_to_images(&mut self, dpi: Option<u32>) -> Result<Vec<u8>, JsValue> {
+        let dpi = dpi.unwrap_or(150);
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Lock failed"))?;
+        crate::rendering::flatten_to_images(&mut inner, dpi)
+            .map_err(|e| JsValue::from_str(&format!("Failed to flatten: {}", e)))
+    }
 }
 
 // ============================================================================
@@ -2407,6 +2529,31 @@ pub struct WasmPdf {
 
 #[wasm_bindgen]
 impl WasmPdf {
+    /// Merge multiple PDF byte arrays into a single PDF.
+    ///
+    /// @param pdfs - Array of Uint8Array, each containing a PDF
+    /// @returns WasmPdf containing all pages
+    #[wasm_bindgen(js_name = "merge")]
+    pub fn merge(pdfs: Vec<js_sys::Uint8Array>) -> Result<WasmPdf, JsValue> {
+        if pdfs.is_empty() {
+            return Err(JsValue::from_str("No PDFs provided"));
+        }
+        let first_bytes = pdfs[0].to_vec();
+        let first = crate::document::PdfDocument::from_bytes(first_bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let mut editor = crate::editor::DocumentEditor::from_document(first)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        for pdf_data in &pdfs[1..] {
+            editor
+                .merge_from_bytes(&pdf_data.to_vec())
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        let bytes = editor
+            .save_to_bytes()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(WasmPdf { bytes })
+    }
+
     /// Create a PDF from Markdown content.
     ///
     /// @param content - Markdown string
@@ -2652,7 +2799,7 @@ mod tests {
     }
 
     fn doc_from_text(text: &str) -> WasmPdfDocument {
-        WasmPdfDocument::new(&make_text_pdf(text)).unwrap()
+        WasmPdfDocument::new(&make_text_pdf(text), None).unwrap()
     }
 
     fn make_markdown_pdf(md: &str) -> Vec<u8> {
@@ -2669,7 +2816,7 @@ mod tests {
     #[test]
     fn test_new_valid_pdf() {
         let bytes = make_text_pdf("Hello world");
-        let result = WasmPdfDocument::new(&bytes);
+        let result = WasmPdfDocument::new(&bytes, None);
         assert!(result.is_ok());
     }
 
@@ -2677,14 +2824,14 @@ mod tests {
     #[test]
     #[cfg(target_arch = "wasm32")]
     fn test_new_invalid_bytes() {
-        let result = WasmPdfDocument::new(b"not a pdf at all");
+        let result = WasmPdfDocument::new(b"not a pdf at all", None);
         assert!(result.is_err());
     }
 
     #[test]
     #[cfg(target_arch = "wasm32")]
     fn test_new_empty_bytes() {
-        let result = WasmPdfDocument::new(b"");
+        let result = WasmPdfDocument::new(b"", None);
         assert!(result.is_err());
     }
 
@@ -2723,7 +2870,7 @@ mod tests {
     #[test]
     fn test_page_count_from_markdown() {
         let bytes = make_markdown_pdf("# Title\n\nSome content");
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         assert!(doc.page_count().unwrap() >= 1);
     }
 
@@ -3151,7 +3298,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     fn test_get_form_fields_returns_array() {
         let bytes = make_form_pdf();
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         let result = doc.get_form_fields().unwrap();
         assert!(js_sys::Array::is_array(&result));
         let arr = js_sys::Array::from(&result);
@@ -3167,7 +3314,7 @@ mod tests {
     #[test]
     fn test_has_xfa_on_form_pdf() {
         let bytes = make_form_pdf();
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         assert!(!doc.has_xfa().unwrap(), "PdfWriter form should not have XFA");
     }
 
@@ -3217,7 +3364,7 @@ mod tests {
         doc.set_title("Roundtrip Title").unwrap();
         let bytes = doc.save_to_bytes().unwrap();
 
-        let mut doc2 = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc2 = WasmPdfDocument::new(&bytes, None).unwrap();
         let text = doc2.extract_text(0, JsValue::UNDEFINED).unwrap();
         assert!(text.contains("Roundtrip"), "roundtrip should preserve text, got: {}", text);
     }
@@ -3267,7 +3414,7 @@ mod tests {
         )
         .unwrap();
         assert!(pdf.size() > 0);
-        let mut doc = WasmPdfDocument::new(&pdf.to_bytes()).unwrap();
+        let mut doc = WasmPdfDocument::new(&pdf.to_bytes(), None).unwrap();
         assert_eq!(doc.page_count().unwrap(), 1);
     }
 
@@ -3296,7 +3443,7 @@ mod tests {
     #[test]
     fn test_get_form_field_value_text() {
         let bytes = make_form_pdf();
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         // get_form_field_value returns JsValue which aborts on non-wasm32,
         // so test the underlying Rust API directly here.
         let editor_mutex = doc.ensure_editor().unwrap();
@@ -3308,7 +3455,7 @@ mod tests {
     #[test]
     fn test_set_form_field_value_text() {
         let bytes = make_form_pdf();
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         // set_form_field_value with a string JsValue
         // On native, JsValue operations are stubbed, so we test via the Rust API
         // instead — just verify the method exists and the type signatures match
@@ -3342,7 +3489,7 @@ mod tests {
     #[test]
     fn test_flatten_forms() {
         let bytes = make_form_pdf();
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         let editor_mutex = doc.ensure_editor().unwrap();
         let mut editor = editor_mutex.lock().unwrap();
         let result = editor.flatten_forms();
@@ -3352,7 +3499,7 @@ mod tests {
     #[test]
     fn test_flatten_forms_on_page() {
         let bytes = make_form_pdf();
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         let editor_mutex = doc.ensure_editor().unwrap();
         let mut editor = editor_mutex.lock().unwrap();
         let result = editor.flatten_forms_on_page(0);
@@ -3367,7 +3514,7 @@ mod tests {
     fn test_merge_from_bytes() {
         let bytes1 = make_text_pdf("Page 1");
         let bytes2 = make_text_pdf("Page 2");
-        let mut doc = WasmPdfDocument::new(&bytes1).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes1, None).unwrap();
         let editor_mutex = doc.ensure_editor().unwrap();
         let mut editor = editor_mutex.lock().unwrap();
         let count = editor.merge_from_bytes(&bytes2).unwrap();
@@ -3381,7 +3528,7 @@ mod tests {
     #[test]
     fn test_embed_file() {
         let bytes = make_text_pdf("Hello");
-        let mut doc = WasmPdfDocument::new(&bytes).unwrap();
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
         let editor_mutex = doc.ensure_editor().unwrap();
         let mut editor = editor_mutex.lock().unwrap();
         let result = editor.embed_file("readme.txt", b"Hello World".to_vec());
@@ -3459,5 +3606,46 @@ mod tests {
             0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFF, 0xDA, 0x00, 0x08,
             0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xFB, 0xD5, 0xDB, 0x20, 0xA8, 0xF9, 0xFF, 0xD9,
         ]
+    }
+
+    // ========================================================================
+    // Tests for new binding methods (v0.3.18)
+    // ========================================================================
+
+    #[test]
+    fn test_validate_pdf_a() {
+        let mut doc = doc_from_text("Hello World");
+        let result = doc.validate_pdf_a("1b");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_pdf_a_invalid_level() {
+        let mut doc = doc_from_text("Hello");
+        let result = doc.validate_pdf_a("invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_page() {
+        // Create a 2-page PDF
+        let bytes = make_markdown_pdf("# Page 1\n\n---\n\n# Page 2");
+        let mut doc = WasmPdfDocument::new(&bytes, None).unwrap();
+        let initial_count = doc.page_count().unwrap();
+        if initial_count >= 2 {
+            assert!(doc.delete_page(0).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_extract_pages() {
+        let mut doc = doc_from_text("Extract me");
+        let result = doc.extract_pages(vec![0]);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert!(!bytes.is_empty());
+        // Verify the extracted PDF is valid
+        let extracted = WasmPdfDocument::new(&bytes, None);
+        assert!(extracted.is_ok());
     }
 }

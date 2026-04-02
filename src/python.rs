@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyIOError, PyRuntimeError};
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyBytes;
@@ -60,12 +60,22 @@ impl PyPdfDocument {
 impl PyPdfDocument {
     /// Open a PDF file.
     ///
+    /// Open a PDF file, optionally with a password for encrypted documents.
+    ///
     /// Args:
     ///     path (str | pathlib.Path): Path to the PDF file
+    ///     password (str, optional): Password for encrypted PDFs
     #[new]
-    fn new(path: PathBuf) -> PyResult<Self> {
-        let doc = RustPdfDocument::open(&path)
+    #[pyo3(signature = (path, password=None))]
+    #[allow(unused_mut)]
+    fn new(path: PathBuf, password: Option<&str>) -> PyResult<Self> {
+        let mut doc = RustPdfDocument::open(&path)
             .map_err(|e| PyIOError::new_err(format!("Failed to open PDF: {}", e)))?;
+
+        if let Some(pw) = password {
+            doc.authenticate(pw.as_bytes())
+                .map_err(|e| PyRuntimeError::new_err(format!("Authentication failed: {}", e)))?;
+        }
 
         let path_str = path.to_string_lossy().into_owned();
         Ok(PyPdfDocument {
@@ -76,12 +86,19 @@ impl PyPdfDocument {
         })
     }
 
-    /// Open a PDF from bytes.
+    /// Open a PDF from bytes, optionally with a password.
     #[staticmethod]
-    fn from_bytes(data: &Bound<'_, PyBytes>) -> PyResult<Self> {
+    #[pyo3(signature = (data, password=None))]
+    #[allow(unused_mut)]
+    fn from_bytes(data: &Bound<'_, PyBytes>, password: Option<&str>) -> PyResult<Self> {
         let bytes = data.as_bytes().to_vec();
-        let doc = RustPdfDocument::from_bytes(bytes.clone())
+        let mut doc = RustPdfDocument::from_bytes(bytes.clone())
             .map_err(|e| PyIOError::new_err(format!("Failed to open PDF from bytes: {}", e)))?;
+
+        if let Some(pw) = password {
+            doc.authenticate(pw.as_bytes())
+                .map_err(|e| PyRuntimeError::new_err(format!("Authentication failed: {}", e)))?;
+        }
 
         Ok(PyPdfDocument {
             inner: doc,
@@ -1489,6 +1506,142 @@ impl PyPdfDocument {
         }
     }
 
+    // ==========================================
+    // Validation — PDF/A, PDF/UA, PDF/X
+    // ==========================================
+
+    /// Validate PDF/A compliance.
+    /// Returns a dict with 'valid', 'level', 'errors', 'warnings' keys.
+    #[pyo3(signature = (level="1b"))]
+    fn validate_pdf_a(&mut self, py: Python<'_>, level: &str) -> PyResult<Py<PyAny>> {
+        use crate::compliance::pdf_a::validate_pdf_a;
+        use crate::compliance::types::PdfALevel;
+        let pdf_level = match level {
+            "1a" => PdfALevel::A1a,
+            "1b" => PdfALevel::A1b,
+            "2a" => PdfALevel::A2a,
+            "2b" => PdfALevel::A2b,
+            "2u" => PdfALevel::A2u,
+            "3a" => PdfALevel::A3a,
+            "3b" => PdfALevel::A3b,
+            "3u" => PdfALevel::A3u,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown PDF/A level: '{}'. Use 1a, 1b, 2a, 2b, 2u, 3a, 3b, 3u",
+                    level
+                )))
+            },
+        };
+        let result = validate_pdf_a(&mut self.inner, pdf_level)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("valid", result.errors.is_empty())?;
+        d.set_item("level", level)?;
+        let errors: Vec<String> = result.errors.iter().map(|e| e.to_string()).collect();
+        let warnings: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+        d.set_item("errors", errors)?;
+        d.set_item("warnings", warnings)?;
+        Ok(d.into())
+    }
+
+    /// Validate PDF/UA accessibility compliance.
+    /// Returns a dict with 'valid', 'errors', 'warnings' keys.
+    fn validate_pdf_ua(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use crate::compliance::pdf_ua::validate_pdf_ua;
+        let result = validate_pdf_ua(&mut self.inner, crate::compliance::pdf_ua::PdfUaLevel::Ua1)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("valid", result.errors.is_empty())?;
+        let errors: Vec<String> = result.errors.iter().map(|e| e.to_string()).collect();
+        let warnings: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+        d.set_item("errors", errors)?;
+        d.set_item("warnings", warnings)?;
+        Ok(d.into())
+    }
+
+    /// Validate PDF/X print compliance.
+    /// Returns a dict with 'valid', 'level', 'errors', 'warnings' keys.
+    #[pyo3(signature = (level="1a_2001"))]
+    fn validate_pdf_x(&mut self, py: Python<'_>, level: &str) -> PyResult<Py<PyAny>> {
+        use crate::compliance::pdf_x::types::PdfXLevel;
+        use crate::compliance::pdf_x::validator::validate_pdf_x;
+        let pdf_level = match level {
+            "1a_2001" => PdfXLevel::X1a2001,
+            "3_2002" => PdfXLevel::X32002,
+            "4" => PdfXLevel::X4,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown PDF/X level: '{}'. Use 1a_2001, 3_2002, 4",
+                    level
+                )))
+            },
+        };
+        let result = validate_pdf_x(&mut self.inner, pdf_level)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("valid", result.errors.is_empty())?;
+        d.set_item("level", level)?;
+        let errors: Vec<String> = result.errors.iter().map(|e| e.to_string()).collect();
+        let warnings: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+        d.set_item("errors", errors)?;
+        d.set_item("warnings", warnings)?;
+        Ok(d.into())
+    }
+
+    // ==========================================
+    // Page Operations — extract, delete, move
+    // ==========================================
+
+    /// Extract page range to a new PDF file.
+    /// `pages` is a list of 0-based page indices.
+    fn extract_pages(&mut self, pages: Vec<usize>, output: &str) -> PyResult<()> {
+        self.ensure_editor()?;
+        let editor = self.editor.as_mut().unwrap();
+        editor
+            .extract_pages(&pages, output)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Delete a page by index (0-based).
+    fn delete_page(&mut self, index: usize) -> PyResult<()> {
+        use crate::editor::EditableDocument;
+        self.ensure_editor()?;
+        let editor = self.editor.as_mut().unwrap();
+        editor
+            .remove_page(index)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Move a page from one position to another (0-based indices).
+    fn move_page(&mut self, from_index: usize, to_index: usize) -> PyResult<()> {
+        use crate::editor::EditableDocument;
+        self.ensure_editor()?;
+        let editor = self.editor.as_mut().unwrap();
+        editor
+            .move_page(from_index, to_index)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Create a flattened PDF where each page is rendered as an image.
+    /// This "burns in" all annotations, form fields, and overlays into
+    /// a flat raster representation. Useful for redaction, archival,
+    /// or ensuring consistent visual output across viewers.
+    ///
+    /// Returns the flattened PDF as bytes.
+    #[pyo3(signature = (dpi=150))]
+    fn flatten_to_images(&mut self, py: Python<'_>, dpi: u32) -> PyResult<Py<PyBytes>> {
+        #[cfg(feature = "rendering")]
+        {
+            let bytes = crate::rendering::flatten_to_images(&mut self.inner, dpi)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            Ok(PyBytes::new(py, &bytes).unbind())
+        }
+        #[cfg(not(feature = "rendering"))]
+        {
+            Err(PyRuntimeError::new_err("Rendering feature not enabled"))
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("PdfDocument(version={}.{})", self.inner.version().0, self.inner.version().1)
     }
@@ -1716,6 +1869,20 @@ impl PyPdf {
         })
     }
 
+    /// Merge multiple PDF files into one.
+    ///
+    /// Args:
+    ///     paths (list[str]): List of paths to PDF files to merge
+    ///
+    /// Returns:
+    ///     Pdf: A new PDF containing all pages from the input files
+    #[staticmethod]
+    fn merge(paths: Vec<String>) -> PyResult<Self> {
+        let bytes =
+            crate::api::merge_pdfs(&paths).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyPdf { bytes })
+    }
+
     fn __len__(&self) -> usize {
         self.bytes.len()
     }
@@ -1779,6 +1946,10 @@ impl PyOfficeConverter {
 #[cfg(feature = "office")]
 #[pymethods]
 impl PyOfficeConverter {
+    #[new]
+    fn new() -> Self {
+        PyOfficeConverter
+    }
     #[staticmethod]
     fn from_docx(path: &str) -> PyResult<PyPdf> {
         let res = RustOfficeConverter::new()
@@ -3120,8 +3291,14 @@ impl PyPageTemplate {
     }
 }
 
+#[pyfunction]
+fn setup_logging() {
+    let _ = env_logger::builder().try_init();
+}
+
 #[pymodule]
 fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(setup_logging, m)?)?;
     m.add_class::<PyPdfDocument>()?;
     m.add_class::<PyPdf>()?;
     m.add_class::<PyPdfPage>()?;
