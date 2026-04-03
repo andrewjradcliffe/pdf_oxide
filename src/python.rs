@@ -1171,6 +1171,65 @@ impl PyPdfDocument {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Extract complete page text data in a single call.
+    ///
+    /// Returns a dict with spans, per-character data, and page dimensions.
+    /// The chars are derived from spans using font-metric widths when available.
+    ///
+    /// Args:
+    ///     page (int): Zero-based page index.
+    ///     reading_order (str, optional): Reading order strategy. One of
+    ///         "top_to_bottom" (default) or "column_aware".
+    ///
+    /// Returns:
+    ///     dict: ``{"spans": [...], "chars": [...], "page_width": float, "page_height": float}``
+    #[pyo3(signature = (page, reading_order=None))]
+    fn extract_page_text(
+        &mut self,
+        py: Python<'_>,
+        page: usize,
+        reading_order: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let order = match reading_order {
+            Some("column_aware") => crate::document::ReadingOrder::ColumnAware,
+            Some("top_to_bottom") | None => crate::document::ReadingOrder::TopToBottom,
+            Some(other) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Unknown reading_order '{}'. Expected 'top_to_bottom' or 'column_aware'.",
+                    other
+                )));
+            },
+        };
+
+        let page_text = self
+            .inner
+            .extract_page_text_with_options(page, order)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let dict = pyo3::types::PyDict::new(py);
+
+        // Spans as list of PyTextSpan
+        let spans_list: Vec<PyTextSpan> = page_text
+            .spans
+            .into_iter()
+            .map(|s| PyTextSpan { inner: s })
+            .collect();
+        dict.set_item("spans", spans_list)?;
+
+        // Chars as list of PyTextChar
+        let chars_list: Vec<PyTextChar> = page_text
+            .chars
+            .into_iter()
+            .map(|ch| PyTextChar { inner: ch })
+            .collect();
+        dict.set_item("chars", chars_list)?;
+
+        dict.set_item("page_width", page_text.page_width)?;
+        dict.set_item("page_height", page_text.page_height)?;
+
+        Ok(dict.into())
+    }
+
     /// Get document outline.
     fn get_outline(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let outline = self

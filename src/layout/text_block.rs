@@ -424,6 +424,23 @@ impl Color {
     }
 }
 
+/// Complete text extraction result for a single page.
+///
+/// Single-call API that provides spans, per-character data, and page dimensions.
+/// The `chars` field is derived from spans via `TextSpan::to_chars()`, using
+/// font-metric widths when available for accurate per-glyph bounding boxes.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PageText {
+    /// Text spans in reading order.
+    pub spans: Vec<TextSpan>,
+    /// Per-character data derived from spans (uses font metric widths when available).
+    pub chars: Vec<TextChar>,
+    /// Page width in PDF points.
+    pub page_width: f32,
+    /// Page height in PDF points.
+    pub page_height: f32,
+}
+
 /// A text block (word, line, or paragraph).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TextBlock {

@@ -20,7 +20,7 @@ pub mod font_normalization;
 pub use area_filter::{LayoutObjectSpatial, RectFilterMode, SpatialCollectionFiltering};
 pub use document_analyzer::{AdaptiveLayoutParams, DocumentProperties};
 pub use reading_order::graph_based_reading_order;
-pub use text_block::{Color, FontWeight, TextBlock, TextChar, TextLine, TextSpan, Word};
+pub use text_block::{Color, FontWeight, PageText, TextBlock, TextChar, TextLine, TextSpan, Word};
 
 // Re-export Phase 2 components
 pub use bold_validation::{BoldGroup, BoldMarkerDecision, BoldMarkerValidator};

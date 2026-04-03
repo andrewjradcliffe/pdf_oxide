@@ -5174,6 +5174,77 @@ impl PdfDocument {
         Ok(spans)
     }
 
+    /// Extract complete page text data in a single call.
+    ///
+    /// Returns a [`PageText`] containing spans in reading order, per-character
+    /// data derived from those spans (using font-metric widths when available),
+    /// and the page dimensions. Uses the default `TopToBottom` reading order.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_index` - Zero-based page index
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::document::PdfDocument;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut doc = PdfDocument::open("example.pdf")?;
+    /// let page_text = doc.extract_page_text(0)?;
+    /// println!("Page {}x{} pt", page_text.page_width, page_text.page_height);
+    /// println!("{} spans, {} chars", page_text.spans.len(), page_text.chars.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn extract_page_text(&mut self, page_index: usize) -> Result<crate::layout::PageText> {
+        self.extract_page_text_with_options(page_index, ReadingOrder::default())
+    }
+
+    /// Extract complete page text data with a specific reading order.
+    ///
+    /// Like [`extract_page_text`](Self::extract_page_text) but allows choosing
+    /// between `TopToBottom` and `ColumnAware` reading order.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_index` - Zero-based page index
+    /// * `reading_order` - Reading order strategy to apply
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::document::{PdfDocument, ReadingOrder};
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut doc = PdfDocument::open("two_column.pdf")?;
+    /// let page_text = doc.extract_page_text_with_options(0, ReadingOrder::ColumnAware)?;
+    /// for span in &page_text.spans {
+    ///     println!("{}", span.text);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn extract_page_text_with_options(
+        &mut self,
+        page_index: usize,
+        reading_order: ReadingOrder,
+    ) -> Result<crate::layout::PageText> {
+        // Get spans with the requested reading order
+        let spans = self.extract_spans_with_reading_order(page_index, reading_order)?;
+
+        // Derive chars from spans (uses char_widths for accurate positioning)
+        let chars: Vec<crate::layout::TextChar> = spans.iter().flat_map(|s| s.to_chars()).collect();
+
+        // Get page dimensions from MediaBox
+        let media_box = self.get_page_media_box(page_index)?;
+
+        Ok(crate::layout::PageText {
+            spans,
+            chars,
+            page_width: media_box.2,
+            page_height: media_box.3,
+        })
+    }
+
     /// Extract text spans from a page with custom configuration.
     ///
     /// This method allows controlling span merging behavior through configuration,
@@ -12545,5 +12616,76 @@ mod tests {
             vec!["L1", "L2", "L3", "R1", "R2", "R3"],
             "ColumnAware should read left column fully before right column"
         );
+    }
+
+    // ========================================================================
+    // extract_page_text / PageText tests (Issue #268)
+    // ========================================================================
+
+    #[test]
+    fn test_extract_page_text_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let page_text = doc.extract_page_text(0).unwrap();
+        assert!(page_text.spans.is_empty());
+        assert!(page_text.chars.is_empty());
+        // MediaBox is [0 0 612 792] in build_minimal_pdf
+        assert!((page_text.page_width - 612.0).abs() < 0.1);
+        assert!((page_text.page_height - 792.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_extract_page_text_has_page_dimensions() {
+        let content = b"BT /F1 12 Tf (Hello) Tj ET";
+        let pdf = build_minimal_pdf(content);
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let page_text = doc.extract_page_text(0).unwrap();
+        assert!((page_text.page_width - 612.0).abs() < 0.1);
+        assert!((page_text.page_height - 792.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_extract_page_text_chars_derived_from_spans() {
+        let content = b"BT /F1 12 Tf (Hello) Tj ET";
+        let pdf = build_minimal_pdf(content);
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let page_text = doc.extract_page_text(0).unwrap();
+        // Total chars should equal sum of chars across all spans
+        let expected_char_count: usize =
+            page_text.spans.iter().map(|s| s.text.chars().count()).sum();
+        assert_eq!(page_text.chars.len(), expected_char_count);
+    }
+
+    #[test]
+    fn test_extract_page_text_with_column_aware() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let page_text = doc
+            .extract_page_text_with_options(0, ReadingOrder::ColumnAware)
+            .unwrap();
+        assert!(page_text.spans.is_empty());
+        assert!((page_text.page_width - 612.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_extract_page_text_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let result = doc.extract_page_text(99);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_page_text_serializable() {
+        // Verify PageText derives serde::Serialize
+        let page_text = crate::layout::PageText {
+            spans: Vec::new(),
+            chars: Vec::new(),
+            page_width: 612.0,
+            page_height: 792.0,
+        };
+        let json = serde_json::to_string(&page_text).unwrap();
+        assert!(json.contains("page_width"));
+        assert!(json.contains("page_height"));
     }
 }

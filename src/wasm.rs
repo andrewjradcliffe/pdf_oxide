@@ -572,6 +572,43 @@ impl WasmPdfDocument {
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 
+    /// Extract complete page text data in a single call.
+    ///
+    /// Returns `{ spans, chars, page_width, page_height }`.
+    /// The `chars` are derived from spans using font-metric widths when available.
+    ///
+    /// Optional `reading_order`: `"column_aware"` for XY-Cut column detection,
+    /// or `"top_to_bottom"` (default).
+    #[wasm_bindgen(js_name = "extractPageText")]
+    pub fn extract_page_text(
+        &mut self,
+        page_index: usize,
+        reading_order: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let order = match reading_order.as_deref() {
+            Some("column_aware") => crate::document::ReadingOrder::ColumnAware,
+            Some("top_to_bottom") | None => crate::document::ReadingOrder::TopToBottom,
+            Some(other) => {
+                return Err(JsValue::from_str(&format!(
+                    "Unknown reading_order '{}'. Expected 'top_to_bottom' or 'column_aware'.",
+                    other
+                )));
+            },
+        };
+
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+
+        let page_text = inner
+            .extract_page_text_with_options(page_index, order)
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract page text: {}", e)))?;
+
+        serde_wasm_bindgen::to_value(&page_text)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
     /// Extract word-level data from a page.
     ///
     /// Returns an array of objects with: text, bbox, font_name, font_size,
