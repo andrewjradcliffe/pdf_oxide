@@ -51,6 +51,7 @@ fn make_span_with_order(
 }
 
 /// Helper to create a text span with explicit width and reading order.
+#[allow(clippy::too_many_arguments)]
 fn make_span_sized(
     text: &str,
     x: f32,
@@ -569,17 +570,13 @@ fn test_same_line_spans_with_overlapping_bboxes_preserve_spaces() {
     let fs = 12.0;
 
     // "...please visit " — trailing space encodes the gap before the link
-    let span1 = make_span_sized(
-        "please visit ", 56.7, 317.3, 358.6, fs, FontWeight::Normal, false, 0,
-    );
+    let span1 =
+        make_span_sized("please visit ", 56.7, 317.3, 358.6, fs, FontWeight::Normal, false, 0);
     // "www.example.com" — link span, bbox overlaps previous by ~0.7pt
-    let span2 = make_span_sized(
-        "www.example.com", 414.6, 317.3, 103.3, fs, FontWeight::Normal, false, 1,
-    );
+    let span2 =
+        make_span_sized("www.example.com", 414.6, 317.3, 103.3, fs, FontWeight::Normal, false, 1);
     // " to " — leading and trailing spaces encode gaps on both sides
-    let span3 = make_span_sized(
-        " to ", 517.1, 317.3, 15.3, fs, FontWeight::Normal, false, 2,
-    );
+    let span3 = make_span_sized(" to ", 517.1, 317.3, 15.3, fs, FontWeight::Normal, false, 2);
 
     let config = TextPipelineConfig::default();
     let converter = MarkdownOutputConverter::new();
@@ -587,11 +584,13 @@ fn test_same_line_spans_with_overlapping_bboxes_preserve_spaces() {
 
     assert!(
         !output.contains("visitwww") && !output.contains("visit["),
-        "Missing space before link. Output: {}", output
+        "Missing space before link. Output: {}",
+        output
     );
     assert!(
         !output.contains("comto") && !output.contains("]to"),
-        "Missing space after link. Output: {}", output
+        "Missing space after link. Output: {}",
+        output
     );
 }
 
@@ -601,15 +600,20 @@ fn test_same_line_spans_with_overlapping_bboxes_styled_text() {
     // "for September. " + "*Closing date 7th July.*" + " Please book early"
     let fs = 12.0;
 
-    let span1 = make_span_sized(
-        "for September. ", 56.7, 302.3, 278.9, fs, FontWeight::Normal, false, 0,
-    );
+    let span1 =
+        make_span_sized("for September. ", 56.7, 302.3, 278.9, fs, FontWeight::Normal, false, 0);
     let span2 = make_span_sized(
-        "Closing date 7th July.", 334.3, 302.3, 104.7, fs, FontWeight::Normal, true, 1,
+        "Closing date 7th July.",
+        334.3,
+        302.3,
+        104.7,
+        fs,
+        FontWeight::Normal,
+        true,
+        1,
     );
-    let span3 = make_span_sized(
-        " Please book early", 438.2, 302.3, 90.6, fs, FontWeight::Normal, false, 2,
-    );
+    let span3 =
+        make_span_sized(" Please book early", 438.2, 302.3, 90.6, fs, FontWeight::Normal, false, 2);
 
     let config = TextPipelineConfig::default();
     let converter = MarkdownOutputConverter::new();
@@ -617,10 +621,12 @@ fn test_same_line_spans_with_overlapping_bboxes_styled_text() {
 
     assert!(
         !output.contains("September.*Closing") && !output.contains("September.Closing"),
-        "Missing space before styled text. Output: {}", output
+        "Missing space before styled text. Output: {}",
+        output
     );
     assert!(
         !output.contains("July.*Please") && !output.contains("July.Please"),
-        "Missing space after styled text. Output: {}", output
+        "Missing space after styled text. Output: {}",
+        output
     );
 }

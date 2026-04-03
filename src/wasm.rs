@@ -996,6 +996,29 @@ impl WasmPdfDocument {
                     serde_json::Value::from(path.operations.len()),
                 );
 
+                let ops: Vec<serde_json::Value> = path
+                    .operations
+                    .iter()
+                    .map(|op| match op {
+                        crate::elements::PathOperation::MoveTo(x, y) => {
+                            serde_json::json!({"op": "move_to", "x": x, "y": y})
+                        }
+                        crate::elements::PathOperation::LineTo(x, y) => {
+                            serde_json::json!({"op": "line_to", "x": x, "y": y})
+                        }
+                        crate::elements::PathOperation::CurveTo(cx1, cy1, cx2, cy2, x, y) => {
+                            serde_json::json!({"op": "curve_to", "cx1": cx1, "cy1": cy1, "cx2": cx2, "cy2": cy2, "x": x, "y": y})
+                        }
+                        crate::elements::PathOperation::Rectangle(x, y, w, h) => {
+                            serde_json::json!({"op": "rectangle", "x": x, "y": y, "width": w, "height": h})
+                        }
+                        crate::elements::PathOperation::ClosePath => {
+                            serde_json::json!({"op": "close_path"})
+                        }
+                    })
+                    .collect();
+                obj.insert("operations".into(), serde_json::Value::Array(ops));
+
                 serde_json::Value::Object(obj)
             })
             .collect();
