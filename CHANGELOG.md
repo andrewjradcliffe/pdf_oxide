@@ -2,7 +2,44 @@
 
 All notable changes to PDFOxide are documented here.
 
-<<<<<<< HEAD
+## [0.3.19] - 2026-04-02
+> Text Extraction Accuracy, Column-Aware Reading Order, and Community Contributions
+
+### Features
+
+- **`extract_page_text()` Single-Call DTO** (#268) — New `PageText` struct returns spans, characters, and page dimensions from a single extraction pass, eliminating redundant content stream parsing. Available across Rust, Python, and WASM.
+- **Column-Aware Reading Order** (#270) — `extract_spans()` now accepts an optional `ReadingOrder` parameter. `ReadingOrder::ColumnAware` uses XY-Cut spatial partitioning to detect columns and read each column top-to-bottom, fixing garbled text for multi-column PDFs.
+- **Per-Character Bounding Boxes from Font Metrics** (#269) — `TextSpan` now carries per-glyph advance widths captured during extraction. `to_chars()` produces accurate per-character bounding boxes using font metrics instead of uniform width division.
+- **`is_monospace` Flag on TextSpan/TextChar** (#271) — Exposes the PDF font descriptor FixedPitch bit, with fallback name heuristic (Courier, Consolas, Mono, Fixed). Eliminates the need for fragile font-name string matching.
+- **`Pdf::from_bytes()` Constructor** (#252) — Opens existing PDFs from in-memory bytes without requiring a file path. Available across Rust, Python (`Pdf.from_bytes(data)`), and WASM (`WasmPdf.fromBytes(data)`).
+- **Path Operations in Python** (#261) — `extract_paths()` now includes an `operations` list with individual path commands (move_to, line_to, curve_to, rectangle, close_path) and their coordinates. WASM `extractPaths()` also aligned.
+
+### Bug Fixes
+
+- **Fixed panic on multi-byte UTF-8 in debug log slicing** (#251) — Replaced raw byte-offset string slices with char-boundary-safe helpers, preventing panics when extracting text from CJK/emoji PDFs with debug logging enabled.
+- **Fixed markdown spacing around styled text** (#273) — Markdown output no longer merges words across annotation/style span boundaries (e.g., "visitwww.example.comto" → "visit www.example.com to").
+- **Fixed Form XObject /Matrix application** (#266) — Text extraction now correctly applies Form XObject transformation matrices and wraps in implicit q/Q save/restore per PDF spec Section 8.10.1.
+- **Fixed text matrix advance for rotated text** (#266) — Replaced incorrect `total_width / text_matrix.d.abs()` division (divide-by-zero for 90° rotation) with correct `Tm_new = T(tx, 0) × Tm` per ISO 32000-1 Section 9.4.4.
+- **Fixed prescan CTM loss for deeply nested text** (#267) — Replaced backward 4KB scan with forward CTM tracking across the full content stream, capturing outer scaling transforms for text in streams >256KB (e.g., chart axis labels).
+
+### Dependencies
+
+- **pyo3** 0.27.2 → 0.28.2 — Added `skip_from_py_object` / `from_py_object` annotations per new `FromPyObject` opt-in requirement.
+- **clap** 4.5.60 → 4.6.0
+- **codecov/codecov-action** 5 → 6
+
+### 🏆 Community Contributors
+
+🥇 **@Goldziher** — Thank you for the comprehensive feature requests (#252, #268, #269, #270, #271) that shaped the text extraction improvements in this release. Your detailed issue reports with code examples and spec references made implementation straightforward! 🚀
+
+🥈 **@bsickler** — Thank you for the Form XObject matrix fix (#266) and prescan CTM rewrite (#267). These are critical correctness fixes for text extraction in rotated documents and large content streams! 🚀
+
+🥉 **@hansmrtn** — Thank you for the UTF-8 panic fix (#251). This prevents crashes for any user processing non-ASCII PDFs with debug logging! 🚀
+
+🏅 **@jorlow** — Thank you for the markdown spacing fix (#273). Clean, well-tested fix for a common user-facing issue! 🚀
+
+🏅 **@willywg** — Thank you for exposing path operations in Python (#261), giving downstream tools access to individual vector path commands! 🚀
+
 ## [0.3.18] - 2026-04-01
 > Rendering Engine Overhaul, Visual Parity, and Expanded API
 
