@@ -1355,9 +1355,13 @@ class _PdfOxideLogCapture(logging.Handler):
     level plumbing doesn't always surface those child records reliably.
     """
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__(level=logging.DEBUG)
-        self.records: list[logging.LogRecord] = []
+        # Note: no type annotation on ``self.records`` — we support Python
+        # 3.8 and PEP 585 ``list[X]`` generic syntax is 3.9+. Using
+        # ``typing.List`` would also work; skipping the annotation entirely
+        # is simpler for a test fixture.
+        self.records = []
 
     def emit(self, record: logging.LogRecord) -> None:
         self.records.append(record)
@@ -1405,6 +1409,10 @@ def test_log_level_issue_283_regression():
     except (OSError, RuntimeError):
         pytest.skip("Test fixture '1.pdf' not available or invalid")
 
+    # Capture the pre-test Rust-side log level so we can restore it exactly
+    # instead of hard-coding "info" — avoids leaking global state across
+    # tests in the same process.
+    prev_rust_level = pdf_oxide.get_log_level()
     logger, handler, prev_level, prev_propagate = _capture_pdf_oxide_logs()
     try:
         # Phase 1: DEBUG level should produce at least some DEBUG records.
@@ -1429,7 +1437,7 @@ def test_log_level_issue_283_regression():
             f"of #283): {[(r.name, r.levelname, r.getMessage()) for r in leaked[:5]]}"
         )
     finally:
-        pdf_oxide.set_log_level("info")
+        pdf_oxide.set_log_level(prev_rust_level)
         logger.removeHandler(handler)
         logger.setLevel(prev_level)
         logger.propagate = prev_propagate

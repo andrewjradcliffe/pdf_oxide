@@ -3510,9 +3510,10 @@ fn init_pyo3_log_handle() {
     PYO3_LOG_RESET_HANDLE.get_or_init(|| {
         pyo3_log::try_init().unwrap_or_else(|_| {
             // Another logger was already installed (e.g. by an embedding
-            // host). Grab a ResetHandle anyway by installing a fresh
-            // Logger configuration — `reset_handle()` is available on any
-            // Logger instance without requiring global installation.
+            // host). In that case, do not replace the global logger;
+            // instead, create a standalone default `Logger` value and take
+            // its `ResetHandle`. `reset_handle()` is available on any
+            // `Logger` instance and does not itself perform installation.
             pyo3_log::Logger::default().reset_handle()
         })
     });
@@ -3586,6 +3587,25 @@ fn disable_logging() {
     reset_pyo3_log_cache();
 }
 
+/// Return the current Rust-side log level filter as a lowercase string.
+///
+/// One of: `"off"`, `"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`.
+///
+/// This mirrors the gate controlled by `set_log_level` and is useful for
+/// tests or context managers that want to save/restore the log level
+/// around a block without hard-coding a "default".
+#[pyfunction]
+fn get_log_level() -> &'static str {
+    match log::max_level() {
+        log::LevelFilter::Off => "off",
+        log::LevelFilter::Error => "error",
+        log::LevelFilter::Warn => "warn",
+        log::LevelFilter::Info => "info",
+        log::LevelFilter::Debug => "debug",
+        log::LevelFilter::Trace => "trace",
+    }
+}
+
 #[pymodule]
 fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Bridge Rust `log` to Python `logging` (silent by default, user
@@ -3596,6 +3616,7 @@ fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_pyo3_log_handle();
     m.add_function(wrap_pyfunction!(setup_logging, m)?)?;
     m.add_function(wrap_pyfunction!(set_log_level, m)?)?;
+    m.add_function(wrap_pyfunction!(get_log_level, m)?)?;
     m.add_function(wrap_pyfunction!(disable_logging, m)?)?;
     m.add_class::<PyPdfDocument>()?;
     m.add_class::<PyPdf>()?;

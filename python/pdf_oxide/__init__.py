@@ -70,6 +70,7 @@ from .pdf_oxide import (
     # Extraction
     TextSpan,
     disable_logging,
+    get_log_level,
     set_log_level,
     setup_logging,
 )
@@ -105,6 +106,7 @@ __all__ = [
     # Logging
     "setup_logging",
     "set_log_level",
+    "get_log_level",
     "disable_logging",
 ]
 __version__ = VERSION
