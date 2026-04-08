@@ -1443,6 +1443,232 @@ def test_log_level_issue_283_regression():
         logger.propagate = prev_propagate
 
 
+# === Word/Line Extraction Tests ===
+
+
+def test_extract_words_basic():
+    """Test extracting words from a page."""
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        words = doc.extract_words(0)
+        assert isinstance(words, list)
+        assert len(words) > 0
+        for w in words:
+            assert hasattr(w, "text")
+            assert hasattr(w, "bbox")
+            assert isinstance(w.text, str)
+            assert len(w.text) > 0
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_extract_words_with_threshold():
+    """Test extracting words with a custom word_gap_threshold."""
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        words_default = doc.extract_words(0)
+        words_tight = doc.extract_words(0, word_gap_threshold=0.5)
+        assert isinstance(words_tight, list)
+        assert len(words_tight) > 0
+        # A tighter threshold should generally produce at least as many words
+        assert len(words_tight) >= len(words_default)
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_extract_words_with_region_and_threshold():
+    """Test extracting words with both region and threshold."""
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        words = doc.extract_words(0, region=(0, 0, 300, 400), word_gap_threshold=2.0)
+        assert isinstance(words, list)
+        # Region-filtered results should be a subset of full page
+        all_words = doc.extract_words(0, word_gap_threshold=2.0)
+        assert len(words) <= len(all_words)
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_extract_text_lines_basic():
+    """Test extracting text lines from a page."""
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        lines = doc.extract_text_lines(0)
+        assert isinstance(lines, list)
+        assert len(lines) > 0
+        for line in lines:
+            assert hasattr(line, "text")
+            assert hasattr(line, "bbox")
+            assert isinstance(line.text, str)
+            assert len(line.text) > 0
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_extract_text_lines_with_thresholds():
+    """Test extracting text lines with custom thresholds."""
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        lines = doc.extract_text_lines(0, word_gap_threshold=2.0, line_gap_threshold=5.0)
+        assert isinstance(lines, list)
+        assert len(lines) > 0
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+# === Page Layout Params Tests ===
+
+
+def test_page_layout_params():
+    """Test computing adaptive layout parameters for a page."""
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        params = doc.page_layout_params(0)
+        assert hasattr(params, "word_gap_threshold")
+        assert hasattr(params, "line_gap_threshold")
+        assert hasattr(params, "median_char_width")
+        assert hasattr(params, "median_font_size")
+        assert hasattr(params, "median_line_spacing")
+        assert hasattr(params, "column_count")
+        # Sanity checks — thresholds should be positive
+        assert params.word_gap_threshold > 0
+        assert params.line_gap_threshold > 0
+        assert params.median_char_width > 0
+        assert params.median_font_size > 0
+        # __repr__ should include LayoutParams
+        r = repr(params)
+        assert "LayoutParams" in r
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_page_layout_params_invalid_page():
+    """Test page_layout_params with an invalid page index."""
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        with pytest.raises(RuntimeError):
+            doc.page_layout_params(9999)
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+# === ExtractionProfile Tests ===
+
+
+def test_extraction_profile_inspect():
+    """Test ExtractionProfile static constructors and attributes."""
+    from pdf_oxide import ExtractionProfile
+
+    profile = ExtractionProfile.form()
+    assert profile.name == "Form"
+    assert isinstance(profile.tj_offset_threshold, float)
+    assert isinstance(profile.word_margin_ratio, float)
+    assert isinstance(profile.space_threshold_em_ratio, float)
+    assert isinstance(profile.space_char_multiplier, float)
+    assert isinstance(profile.use_adaptive_threshold, bool)
+
+    r = repr(profile)
+    assert "ExtractionProfile" in r
+    assert "Form" in r
+
+
+def test_extraction_profile_available():
+    """Test ExtractionProfile.available() returns all profile names."""
+    from pdf_oxide import ExtractionProfile
+
+    names = ExtractionProfile.available()
+    assert isinstance(names, list)
+    assert len(names) >= 9
+    assert "Form" in names
+    assert "Academic" in names
+
+
+def test_extraction_profile_all_constructors():
+    """Test that all profile static constructors work."""
+    from pdf_oxide import ExtractionProfile
+
+    constructors = [
+        ExtractionProfile.conservative,
+        ExtractionProfile.aggressive,
+        ExtractionProfile.balanced,
+        ExtractionProfile.academic,
+        ExtractionProfile.policy,
+        ExtractionProfile.form,
+        ExtractionProfile.government,
+        ExtractionProfile.scanned_ocr,
+        ExtractionProfile.adaptive,
+    ]
+    for ctor in constructors:
+        profile = ctor()
+        assert isinstance(profile.name, str)
+        assert len(profile.name) > 0
+
+
+def test_extract_words_with_profile():
+    """Test extracting words with an ExtractionProfile."""
+    from pdf_oxide import ExtractionProfile
+
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        profile = ExtractionProfile.form()
+        words = doc.extract_words(0, profile=profile)
+        assert isinstance(words, list)
+        assert len(words) > 0
+        for w in words:
+            assert isinstance(w.text, str)
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_extract_text_lines_with_profile():
+    """Test extracting text lines with an ExtractionProfile."""
+    from pdf_oxide import ExtractionProfile
+
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        profile = ExtractionProfile.academic()
+        lines = doc.extract_text_lines(0, profile=profile)
+        assert isinstance(lines, list)
+        assert len(lines) > 0
+        for line in lines:
+            assert isinstance(line.text, str)
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_extract_words_profile_and_threshold():
+    """Test combining profile with threshold overrides."""
+    from pdf_oxide import ExtractionProfile
+
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        profile = ExtractionProfile.aggressive()
+        words = doc.extract_words(0, word_gap_threshold=1.5, profile=profile)
+        assert isinstance(words, list)
+        assert len(words) > 0
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
+def test_extract_text_lines_profile_and_thresholds():
+    """Test combining profile with both threshold overrides for text lines."""
+    from pdf_oxide import ExtractionProfile
+
+    try:
+        doc = PdfDocument("tests/fixtures/1.pdf")
+        profile = ExtractionProfile.policy()
+        lines = doc.extract_text_lines(
+            0,
+            word_gap_threshold=2.0,
+            line_gap_threshold=5.0,
+            profile=profile,
+        )
+        assert isinstance(lines, list)
+        assert len(lines) > 0
+    except (OSError, RuntimeError):
+        pytest.skip("Test fixture '1.pdf' not available or invalid")
+
+
 # Note: To run these tests successfully, you'll need to:
 # 1. Install maturin: pip install maturin
 # 2. Build the extension: maturin develop

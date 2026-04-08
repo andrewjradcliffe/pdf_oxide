@@ -374,6 +374,14 @@ from pdf_oxide import ExtractionProfile
 profile = ExtractionProfile.form()
 print(f"Profile: {profile.name}, word_margin_ratio={profile.word_margin_ratio}")
 
+# Pass a profile to extraction methods to control how raw text is parsed
+words = doc.extract_words(0, profile=ExtractionProfile.form())
+lines = doc.extract_text_lines(0, profile=ExtractionProfile.academic())
+
+# Combine profile with threshold overrides (profile controls span parsing,
+# thresholds control word/line clustering)
+words = doc.extract_words(0, word_gap_threshold=1.5, profile=ExtractionProfile.aggressive())
+
 # 5. Image metadata
 images = doc.extract_images(0)
 for img in images:

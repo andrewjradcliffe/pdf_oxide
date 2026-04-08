@@ -323,18 +323,28 @@ impl PyPdfDocument {
     }
 
     /// Extract words.
-    #[pyo3(signature = (page, region=None, word_gap_threshold=None))]
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
+    ///     word_gap_threshold (float, optional): Override for the horizontal gap
+    ///         (in PDF points) used to split characters into words. Smaller values
+    ///         produce more words.
+    ///     profile (ExtractionProfile, optional): Pre-tuned extraction profile
+    ///         that controls how raw text is parsed from the PDF content stream.
+    #[pyo3(signature = (page, region=None, word_gap_threshold=None, profile=None))]
     fn extract_words(
         &mut self,
         page: usize,
         region: Option<(f32, f32, f32, f32)>,
         word_gap_threshold: Option<f32>,
+        profile: Option<PyExtractionProfile>,
     ) -> PyResult<Vec<PyWord>> {
         use crate::layout::{RectFilterMode, SpatialCollectionFiltering};
 
         let words = self
             .inner
-            .extract_words_with_thresholds(page, word_gap_threshold)
+            .extract_words_with_thresholds(page, word_gap_threshold, profile.map(|p| p.inner))
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract words: {}", e)))?;
 
         let filtered = if let Some((x, y, w, h)) = region {
@@ -348,19 +358,35 @@ impl PyPdfDocument {
     }
 
     /// Extract text lines.
-    #[pyo3(signature = (page, region=None, word_gap_threshold=None, line_gap_threshold=None))]
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
+    ///     word_gap_threshold (float, optional): Override for the horizontal gap
+    ///         (in PDF points) used to split characters into words.
+    ///     line_gap_threshold (float, optional): Override for the vertical gap
+    ///         (in PDF points) used to group words into lines.
+    ///     profile (ExtractionProfile, optional): Pre-tuned extraction profile
+    ///         that controls how raw text is parsed from the PDF content stream.
+    #[pyo3(signature = (page, region=None, word_gap_threshold=None, line_gap_threshold=None, profile=None))]
     fn extract_text_lines(
         &mut self,
         page: usize,
         region: Option<(f32, f32, f32, f32)>,
         word_gap_threshold: Option<f32>,
         line_gap_threshold: Option<f32>,
+        profile: Option<PyExtractionProfile>,
     ) -> PyResult<Vec<PyTextLine>> {
         use crate::layout::{RectFilterMode, SpatialCollectionFiltering};
 
         let lines = self
             .inner
-            .extract_text_lines_with_thresholds(page, word_gap_threshold, line_gap_threshold)
+            .extract_text_lines_with_thresholds(
+                page,
+                word_gap_threshold,
+                line_gap_threshold,
+                profile.map(|p| p.inner),
+            )
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))?;
 
         let filtered = if let Some((x, y, w, h)) = region {
@@ -2169,11 +2195,11 @@ impl PyPdfPageRegion {
     }
     fn extract_words(&self, py: Python<'_>) -> PyResult<Vec<PyWord>> {
         let mut d = self.doc.bind(py).borrow_mut();
-        d.extract_words(self.page_index, Some(self.bbox()), None)
+        d.extract_words(self.page_index, Some(self.bbox()), None, None)
     }
     fn extract_text_lines(&self, py: Python<'_>) -> PyResult<Vec<PyTextLine>> {
         let mut d = self.doc.bind(py).borrow_mut();
-        d.extract_text_lines(self.page_index, Some(self.bbox()), None, None)
+        d.extract_text_lines(self.page_index, Some(self.bbox()), None, None, None)
     }
     #[pyo3(signature = (table_settings=None))]
     fn extract_tables(
@@ -3699,7 +3725,12 @@ impl PyLayoutParams {
 }
 
 /// Pre-tuned extraction profile for different document types.
-#[pyclass(module = "pdf_oxide.pdf_oxide", name = "ExtractionProfile", frozen)]
+#[pyclass(
+    module = "pdf_oxide.pdf_oxide",
+    name = "ExtractionProfile",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyExtractionProfile {
     inner: crate::config::ExtractionProfile,

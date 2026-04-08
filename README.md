@@ -165,6 +165,11 @@ lines = doc.extract_text_lines(0, word_gap_threshold=2.5, line_gap_threshold=4.0
 params = doc.page_layout_params(0)
 print(f"word gap: {params.word_gap_threshold:.1f}, line gap: {params.line_gap_threshold:.1f}")
 
+# Use a pre-tuned extraction profile for specific document types
+from pdf_oxide import ExtractionProfile
+words = doc.extract_words(0, profile=ExtractionProfile.form())
+lines = doc.extract_text_lines(0, profile=ExtractionProfile.academic())
+
 # 4. Table extraction (v0.3.14)
 tables = doc.extract_tables(0)
 for table in tables:
