@@ -6,7 +6,7 @@ All notable changes to PDFOxide are documented here.
 
 ### Bug Fixes
 
-- **Prevent SIGSEGV on structure trees with cyclic indirect references** — Tagged PDFs with a cycle in their `/K` indirect references caused `extract_text()` to enter runaway mutual recursion (~10 000 frames) between `parse_struct_elem` and `parse_k_children`, overflowing the stack before `MAX_STRUCT_ELEMENTS` could fire. A `visited: HashSet<u32>` (keyed on PDF object ID) is now threaded through all three entry paths — root array in `parse_structure_tree`, array elements in `parse_k_children`, and direct `/K` references in `parse_struct_elem` — breaking cycles at the point of re-entry. The PDF spec (§14.7) requires structure trees to be directed acyclic graphs; any cycle is a conformance violation. Reproducible with several Allianz Rückdeckungsversicherung PDFs.
+- **Structure tree cycle SIGSEGV** — Cyclic `/K` indirect references in malformed tagged PDFs caused runaway mutual recursion and stack overflow. A visited-object set now breaks cycles before they overflow the stack.
 
 ## [0.3.21] - 2026-04-04
 > Log Level Honored in Python, Multi-Arch Wheels
