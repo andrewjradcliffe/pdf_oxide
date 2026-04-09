@@ -5166,6 +5166,22 @@ impl PdfDocument {
     /// `extract_spans_with_reading_order`. Spans are returned without any
     /// sorting or erase-region filtering applied.
     fn extract_spans_raw(&mut self, page_index: usize) -> Result<Vec<crate::layout::TextSpan>> {
+        self.extract_spans_raw_with_extraction_config(
+            page_index,
+            crate::extractors::TextExtractionConfig::default(),
+        )
+    }
+
+    /// Internal helper: extract raw text spans using a specific extraction config.
+    ///
+    /// This allows callers to provide a [`TextExtractionConfig`] (optionally
+    /// configured with an [`ExtractionProfile`]) to control TJ offset thresholds
+    /// and word boundary detection during span extraction.
+    fn extract_spans_raw_with_extraction_config(
+        &mut self,
+        page_index: usize,
+        config: crate::extractors::TextExtractionConfig,
+    ) -> Result<Vec<crate::layout::TextSpan>> {
         self.require_authenticated()?;
         use crate::extractors::TextExtractor;
 
@@ -5198,8 +5214,8 @@ impl PdfDocument {
             return Ok(Vec::new());
         }
 
-        // Single-pass extraction
-        let mut extractor = TextExtractor::new();
+        // Single-pass extraction with the provided config
+        let mut extractor = TextExtractor::with_config(config);
         if let Some(resources) = page_dict.get("Resources") {
             extractor.set_resources(resources.clone());
             extractor.set_document(self as *const PdfDocument);
@@ -5556,10 +5572,69 @@ impl PdfDocument {
     /// }
     /// ```
     pub fn extract_words(&mut self, page_index: usize) -> Result<Vec<crate::layout::Word>> {
+        self.extract_words_with_thresholds(page_index, None, None)
+    }
+
+    /// Extract words from a page with optional threshold and profile overrides.
+    ///
+    /// When `word_gap_threshold` is `None`, the adaptive threshold is computed
+    /// automatically from page statistics (median character width × 0.3).
+    /// Providing a value (in PDF points) overrides the adaptive computation,
+    /// which is useful for tuning word segmentation on specific document types.
+    ///
+    /// When `profile` is provided, it controls how the underlying text spans are
+    /// extracted from the PDF content stream (TJ offset thresholds, word margin
+    /// ratios). This affects the raw character data before word clustering.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_index` - Zero-based page index
+    /// * `word_gap_threshold` - Optional override for the horizontal gap (in PDF points)
+    ///   used to split characters into words. Smaller values produce more words.
+    /// * `profile` - Optional extraction profile for span-level tuning.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Use adaptive threshold (default behavior)
+    /// let words = doc.extract_words_with_thresholds(0, None, None)?;
+    ///
+    /// // Use a tighter threshold for dense forms
+    /// let words = doc.extract_words_with_thresholds(0, Some(1.5), None)?;
+    ///
+    /// // Use the Form profile for span extraction
+    /// use pdf_oxide::config::ExtractionProfile;
+    /// let words = doc.extract_words_with_thresholds(
+    ///     0, None, Some(ExtractionProfile::FORM),
+    /// )?;
+    /// ```
+    pub fn extract_words_with_thresholds(
+        &mut self,
+        page_index: usize,
+        word_gap_threshold: Option<f32>,
+        profile: Option<crate::config::ExtractionProfile>,
+    ) -> Result<Vec<crate::layout::Word>> {
         use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, Word};
         use crate::pipeline::reading_order::xycut::XYCutStrategy;
 
-        let spans = self.extract_spans(page_index)?;
+        let spans = match profile {
+            Some(p) => {
+                let config = crate::extractors::TextExtractionConfig::new().with_profile(p);
+                let mut s = self.extract_spans_raw_with_extraction_config(page_index, config)?;
+                s.sort_by(|a, b| {
+                    let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
+                    if y_cmp != std::cmp::Ordering::Equal {
+                        return y_cmp;
+                    }
+                    crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+                });
+                if let Some(regions) = self.erase_regions.get(&page_index) {
+                    s.retain(|span| !regions.iter().any(|r| r.intersects(&span.bbox)));
+                }
+                s
+            },
+            None => self.extract_spans(page_index)?,
+        };
         if spans.is_empty() {
             return Ok(Vec::new());
         }
@@ -5581,7 +5656,12 @@ impl PdfDocument {
         }
         let props =
             DocumentProperties::analyze(&all_chars, page_bbox).map_err(Error::LayoutAnalysis)?;
-        let params = AdaptiveLayoutParams::from_properties(&props);
+        let mut params = AdaptiveLayoutParams::from_properties(&props);
+
+        // Apply user-provided threshold override
+        if let Some(wgt) = word_gap_threshold {
+            params.word_gap_threshold = wgt;
+        }
 
         // Step 3: Extract words from each block independently
         let mut words = Vec::new();
@@ -5640,10 +5720,65 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::layout::TextLine>> {
+        self.extract_text_lines_with_thresholds(page_index, None, None, None)
+    }
+
+    /// Extract text lines from a page with optional threshold and profile overrides.
+    ///
+    /// When thresholds are `None`, adaptive values are computed automatically
+    /// from page statistics. Providing values (in PDF points) overrides the
+    /// adaptive computation for fine-grained control over segmentation.
+    ///
+    /// When `profile` is provided, it controls how the underlying text spans are
+    /// extracted from the PDF content stream (TJ offset thresholds, word margin
+    /// ratios). This affects the raw character data before word/line clustering.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_index` - Zero-based page index
+    /// * `word_gap_threshold` - Optional override for the horizontal gap (in PDF points)
+    ///   used to split characters into words. Smaller values produce more words.
+    /// * `line_gap_threshold` - Optional override for the vertical gap (in PDF points)
+    ///   used to group words into lines. Smaller values produce more lines.
+    /// * `profile` - Optional extraction profile for span-level tuning.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Use adaptive thresholds (default behavior)
+    /// let lines = doc.extract_text_lines_with_thresholds(0, None, None, None)?;
+    ///
+    /// // Tune both thresholds for dense forms
+    /// let lines = doc.extract_text_lines_with_thresholds(0, Some(1.5), Some(4.0), None)?;
+    /// ```
+    pub fn extract_text_lines_with_thresholds(
+        &mut self,
+        page_index: usize,
+        word_gap_threshold: Option<f32>,
+        line_gap_threshold: Option<f32>,
+        profile: Option<crate::config::ExtractionProfile>,
+    ) -> Result<Vec<crate::layout::TextLine>> {
         use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, TextLine, Word};
         use crate::pipeline::reading_order::xycut::XYCutStrategy;
 
-        let spans = self.extract_spans(page_index)?;
+        let spans = match profile {
+            Some(p) => {
+                let config = crate::extractors::TextExtractionConfig::new().with_profile(p);
+                let mut s = self.extract_spans_raw_with_extraction_config(page_index, config)?;
+                s.sort_by(|a, b| {
+                    let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
+                    if y_cmp != std::cmp::Ordering::Equal {
+                        return y_cmp;
+                    }
+                    crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+                });
+                if let Some(regions) = self.erase_regions.get(&page_index) {
+                    s.retain(|span| !regions.iter().any(|r| r.intersects(&span.bbox)));
+                }
+                s
+            },
+            None => self.extract_spans(page_index)?,
+        };
         if spans.is_empty() {
             return Ok(Vec::new());
         }
@@ -5662,7 +5797,15 @@ impl PdfDocument {
         let all_chars: Vec<_> = spans.iter().flat_map(|s| s.to_chars()).collect();
         let props =
             DocumentProperties::analyze(&all_chars, page_bbox).map_err(Error::LayoutAnalysis)?;
-        let params = AdaptiveLayoutParams::from_properties(&props);
+        let mut params = AdaptiveLayoutParams::from_properties(&props);
+
+        // Apply user-provided threshold overrides
+        if let Some(wgt) = word_gap_threshold {
+            params.word_gap_threshold = wgt;
+        }
+        if let Some(lgt) = line_gap_threshold {
+            params.line_gap_threshold = lgt;
+        }
 
         // Step 3: Process each block independently
         let mut all_lines = Vec::new();
