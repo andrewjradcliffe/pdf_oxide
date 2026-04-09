@@ -2,6 +2,12 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **Structure tree cycle SIGSEGV** — Cyclic `/K` indirect references in malformed tagged PDFs caused runaway mutual recursion and stack overflow. A visited-object set now breaks cycles before they overflow the stack.
+
 ## [0.3.21] - 2026-04-04
 > Log Level Honored in Python, Multi-Arch Wheels
 
