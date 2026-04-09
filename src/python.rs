@@ -323,47 +323,114 @@ impl PyPdfDocument {
     }
 
     /// Extract words.
-    #[pyo3(signature = (page, region=None))]
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
+    ///     word_gap_threshold (float, optional): Override for the horizontal gap
+    ///         (in PDF points) used to split characters into words. Smaller values
+    ///         produce more words.
+    ///     profile (ExtractionProfile, optional): Pre-tuned extraction profile
+    ///         that controls how raw text is parsed from the PDF content stream.
+    #[pyo3(signature = (page, region=None, word_gap_threshold=None, profile=None))]
     fn extract_words(
         &mut self,
         page: usize,
         region: Option<(f32, f32, f32, f32)>,
+        word_gap_threshold: Option<f32>,
+        profile: Option<PyExtractionProfile>,
     ) -> PyResult<Vec<PyWord>> {
-        let words_result = if let Some((x, y, w, h)) = region {
-            self.inner.extract_words_in_rect(
-                page,
-                crate::geometry::Rect::new(x, y, w, h),
-                crate::layout::RectFilterMode::Intersects,
-            )
+        use crate::layout::{RectFilterMode, SpatialCollectionFiltering};
+
+        let words = self
+            .inner
+            .extract_words_with_thresholds(page, word_gap_threshold, profile.map(|p| p.inner))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract words: {}", e)))?;
+
+        let filtered = if let Some((x, y, w, h)) = region {
+            let rect = crate::geometry::Rect::new(x, y, w, h);
+            words.filter_by_rect(&rect, RectFilterMode::Intersects)
         } else {
-            self.inner.extract_words(page)
+            words
         };
 
-        words_result
-            .map(|words| words.into_iter().map(|w| PyWord { inner: w }).collect())
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract words: {}", e)))
+        Ok(filtered.into_iter().map(|w| PyWord { inner: w }).collect())
     }
 
     /// Extract text lines.
-    #[pyo3(signature = (page, region=None))]
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
+    ///     word_gap_threshold (float, optional): Override for the horizontal gap
+    ///         (in PDF points) used to split characters into words.
+    ///     line_gap_threshold (float, optional): Override for the vertical gap
+    ///         (in PDF points) used to group words into lines.
+    ///     profile (ExtractionProfile, optional): Pre-tuned extraction profile
+    ///         that controls how raw text is parsed from the PDF content stream.
+    #[pyo3(signature = (page, region=None, word_gap_threshold=None, line_gap_threshold=None, profile=None))]
     fn extract_text_lines(
         &mut self,
         page: usize,
         region: Option<(f32, f32, f32, f32)>,
+        word_gap_threshold: Option<f32>,
+        line_gap_threshold: Option<f32>,
+        profile: Option<PyExtractionProfile>,
     ) -> PyResult<Vec<PyTextLine>> {
-        let lines_result = if let Some((x, y, w, h)) = region {
-            self.inner.extract_text_lines_in_rect(
+        use crate::layout::{RectFilterMode, SpatialCollectionFiltering};
+
+        let lines = self
+            .inner
+            .extract_text_lines_with_thresholds(
                 page,
-                crate::geometry::Rect::new(x, y, w, h),
-                crate::layout::RectFilterMode::Intersects,
+                word_gap_threshold,
+                line_gap_threshold,
+                profile.map(|p| p.inner),
             )
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))?;
+
+        let filtered = if let Some((x, y, w, h)) = region {
+            let rect = crate::geometry::Rect::new(x, y, w, h);
+            lines.filter_by_rect(&rect, RectFilterMode::Intersects)
         } else {
-            self.inner.extract_text_lines(page)
+            lines
         };
 
-        lines_result
-            .map(|lines| lines.into_iter().map(|l| PyTextLine { inner: l }).collect())
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))
+        Ok(filtered
+            .into_iter()
+            .map(|l| PyTextLine { inner: l })
+            .collect())
+    }
+
+    /// Get the computed adaptive layout parameters for a page.
+    fn page_layout_params(&mut self, page: usize) -> PyResult<PyLayoutParams> {
+        use crate::layout::{AdaptiveLayoutParams, DocumentProperties};
+
+        let spans = self
+            .inner
+            .extract_spans(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract spans: {}", e)))?;
+
+        let media_box = self
+            .inner
+            .get_page_media_box(page)
+            .unwrap_or((0.0, 0.0, 612.0, 792.0));
+        let page_bbox =
+            crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
+
+        let all_chars: Vec<_> = spans.iter().flat_map(|s| s.to_chars()).collect();
+        let props = DocumentProperties::analyze(&all_chars, page_bbox)
+            .map_err(|e| PyRuntimeError::new_err(format!("Layout analysis failed: {}", e)))?;
+        let params = AdaptiveLayoutParams::from_properties(&props);
+
+        Ok(PyLayoutParams {
+            word_gap_threshold: params.word_gap_threshold,
+            line_gap_threshold: params.line_gap_threshold,
+            median_char_width: props.median_char_width,
+            median_font_size: props.median_font_size,
+            median_line_spacing: props.median_line_spacing,
+            column_count: props.column_count,
+        })
     }
 
     /// Check if Tagged PDF.
@@ -2128,11 +2195,11 @@ impl PyPdfPageRegion {
     }
     fn extract_words(&self, py: Python<'_>) -> PyResult<Vec<PyWord>> {
         let mut d = self.doc.bind(py).borrow_mut();
-        d.extract_words(self.page_index, Some(self.bbox()))
+        d.extract_words(self.page_index, Some(self.bbox()), None, None)
     }
     fn extract_text_lines(&self, py: Python<'_>) -> PyResult<Vec<PyTextLine>> {
         let mut d = self.doc.bind(py).borrow_mut();
-        d.extract_text_lines(self.page_index, Some(self.bbox()))
+        d.extract_text_lines(self.page_index, Some(self.bbox()), None, None, None)
     }
     #[pyo3(signature = (table_settings=None))]
     fn extract_tables(
@@ -2741,6 +2808,15 @@ fn table_settings_to_config(
         if let Some(v) = d.get_item("horizontal_strategy")? {
             let s: String = v.extract()?;
             c.horizontal_strategy = match s.as_str() {
+                "lines" => TableStrategy::Lines,
+                "text" => TableStrategy::Text,
+                "both" => TableStrategy::Both,
+                _ => return Err(PyRuntimeError::new_err("Invalid strategy")),
+            };
+        }
+        if let Some(v) = d.get_item("vertical_strategy")? {
+            let s: String = v.extract()?;
+            c.vertical_strategy = match s.as_str() {
                 "lines" => TableStrategy::Lines,
                 "text" => TableStrategy::Text,
                 "both" => TableStrategy::Both,
@@ -3606,6 +3682,164 @@ fn get_log_level() -> &'static str {
     }
 }
 
+/// Computed adaptive layout parameters for a PDF page.
+#[pyclass(module = "pdf_oxide.pdf_oxide", name = "LayoutParams", frozen)]
+pub struct PyLayoutParams {
+    pub word_gap_threshold: f32,
+    pub line_gap_threshold: f32,
+    pub median_char_width: f32,
+    pub median_font_size: f32,
+    pub median_line_spacing: f32,
+    pub column_count: usize,
+}
+
+#[pymethods]
+impl PyLayoutParams {
+    #[getter]
+    fn word_gap_threshold(&self) -> f32 {
+        self.word_gap_threshold
+    }
+    #[getter]
+    fn line_gap_threshold(&self) -> f32 {
+        self.line_gap_threshold
+    }
+    #[getter]
+    fn median_char_width(&self) -> f32 {
+        self.median_char_width
+    }
+    #[getter]
+    fn median_font_size(&self) -> f32 {
+        self.median_font_size
+    }
+    #[getter]
+    fn median_line_spacing(&self) -> f32 {
+        self.median_line_spacing
+    }
+    #[getter]
+    fn column_count(&self) -> usize {
+        self.column_count
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "LayoutParams(word_gap={:.2}, line_gap={:.2}, char_width={:.2}, font_size={:.2}, line_spacing={:.2}, columns={})",
+            self.word_gap_threshold,
+            self.line_gap_threshold,
+            self.median_char_width,
+            self.median_font_size,
+            self.median_line_spacing,
+            self.column_count,
+        )
+    }
+}
+
+/// Pre-tuned extraction profile for different document types.
+#[pyclass(
+    module = "pdf_oxide.pdf_oxide",
+    name = "ExtractionProfile",
+    frozen,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyExtractionProfile {
+    inner: crate::config::ExtractionProfile,
+}
+
+#[pymethods]
+impl PyExtractionProfile {
+    #[getter]
+    fn name(&self) -> &'static str {
+        self.inner.name
+    }
+    #[getter]
+    fn tj_offset_threshold(&self) -> f32 {
+        self.inner.tj_offset_threshold
+    }
+    #[getter]
+    fn word_margin_ratio(&self) -> f32 {
+        self.inner.word_margin_ratio
+    }
+    #[getter]
+    fn space_threshold_em_ratio(&self) -> f32 {
+        self.inner.space_threshold_em_ratio
+    }
+    #[getter]
+    fn space_char_multiplier(&self) -> f32 {
+        self.inner.space_char_multiplier
+    }
+    #[getter]
+    fn use_adaptive_threshold(&self) -> bool {
+        self.inner.use_adaptive_threshold
+    }
+
+    #[staticmethod]
+    fn conservative() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::CONSERVATIVE,
+        }
+    }
+    #[staticmethod]
+    fn aggressive() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::AGGRESSIVE,
+        }
+    }
+    #[staticmethod]
+    fn balanced() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::BALANCED,
+        }
+    }
+    #[staticmethod]
+    fn academic() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::ACADEMIC,
+        }
+    }
+    #[staticmethod]
+    fn policy() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::POLICY,
+        }
+    }
+    #[staticmethod]
+    fn form() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::FORM,
+        }
+    }
+    #[staticmethod]
+    fn government() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::GOVERNMENT,
+        }
+    }
+    #[staticmethod]
+    fn scanned_ocr() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::SCANNED_OCR,
+        }
+    }
+    #[staticmethod]
+    fn adaptive() -> Self {
+        Self {
+            inner: crate::config::ExtractionProfile::ADAPTIVE,
+        }
+    }
+
+    #[staticmethod]
+    fn available() -> Vec<&'static str> {
+        crate::config::ExtractionProfile::all_profiles().to_vec()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtractionProfile('{}', word_margin_ratio={}, tj_offset_threshold={})",
+            self.inner.name, self.inner.word_margin_ratio, self.inner.tj_offset_threshold,
+        )
+    }
+}
+
 #[pymodule(gil_used = false)]
 fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Bridge Rust `log` to Python `logging` (silent by default, user
@@ -3631,6 +3865,8 @@ fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWord>()?;
     m.add_class::<PyTextLine>()?;
     m.add_class::<PyPdfPageRegion>()?;
+    m.add_class::<PyLayoutParams>()?;
+    m.add_class::<PyExtractionProfile>()?;
     m.add_class::<PyFormField>()?;
     m.add_class::<PyOcrEngine>()?;
     m.add_class::<PyOcrConfig>()?;

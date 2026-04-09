@@ -38,6 +38,10 @@ Text quality: 99.5% parity vs PyMuPDF/pypdfium2.
 ## Extraction
 
 - extract_text(page_index): Extract plain text from a page
+- extract_words(page_index, region=None, word_gap_threshold=None, profile=None): Word-level extraction with bounding boxes. Optional word_gap_threshold (PDF points) overrides adaptive splitting. Optional profile (ExtractionProfile) controls span-level text parsing.
+- extract_text_lines(page_index, region=None, word_gap_threshold=None, line_gap_threshold=None, profile=None): Line-level extraction. Optional thresholds (PDF points) override adaptive word/line grouping. Optional profile controls span-level text parsing.
+- page_layout_params(page_index): Returns computed adaptive thresholds (word_gap, line_gap, median_char_width, median_font_size, etc.) for inspection.
+- ExtractionProfile: Pre-tuned profiles for document types. Pass to extract_words()/extract_text_lines() via profile= kwarg. Static methods: conservative(), aggressive(), balanced(), academic(), policy(), form(), government(), scanned_ocr(), adaptive().
 - extract_spans(page_index): Extract text with font, size, color, position metadata
 - extract_chars(page_index): Per-character extraction with bounding boxes
 - extract_images(page_index): Extract images from content streams, XObjects, inline

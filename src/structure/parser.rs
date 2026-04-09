@@ -6,7 +6,7 @@ use super::types::{StructChild, StructElem, StructTreeRoot, StructType};
 use crate::document::PdfDocument;
 use crate::error::Error;
 use crate::object::Object;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Maximum time allowed for structure tree parsing (native only).
 /// Documents with huge trees (50K+ elements) would take 5-10s;
@@ -252,6 +252,7 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
 
     // Parse K (children) - can be a single element or array of elements
     let mut element_count: usize = 0;
+    let mut visited: HashSet<u32> = HashSet::new();
 
     if let Some(k_obj) = struct_tree_dict.get("K") {
         let k_obj = resolve_object(document, k_obj)?;
@@ -273,6 +274,17 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
                         );
                         return Ok(None);
                     }
+                    // Record root element IDs before descending so that a back-reference
+                    // from any descendant to this root is detectable as a cycle.
+                    if let Object::Reference(obj_ref) = &elem_obj {
+                        if !visited.insert(obj_ref.id) {
+                            log::warn!(
+                                "Cycle in structure tree: root object {} already visited, skipping",
+                                obj_ref.id
+                            );
+                            continue;
+                        }
+                    }
                     if let Some(elem) = parse_struct_elem(
                         document,
                         &elem_obj,
@@ -280,6 +292,7 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
                         &page_map,
                         deadline,
                         &mut element_count,
+                        &mut visited,
                     )? {
                         struct_tree.add_root_element(elem);
                     }
@@ -294,6 +307,7 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
                     &page_map,
                     deadline,
                     &mut element_count,
+                    &mut visited,
                 )? {
                     struct_tree.add_root_element(elem);
                 }
@@ -331,6 +345,7 @@ fn parse_struct_elem(
     page_map: &HashMap<u32, u32>,
     deadline: Deadline,
     element_count: &mut usize,
+    visited: &mut HashSet<u32>,
 ) -> Result<Option<StructElem>, Error> {
     // Check budgets before doing work
     if deadline.is_expired() || *element_count > MAX_STRUCT_ELEMENTS {
@@ -398,17 +413,53 @@ fn parse_struct_elem(
     }
 
     // Parse /K (children)
-    if let Some(k_obj) = dict.get("K") {
-        let k_obj = resolve_object(document, k_obj)?;
-        parse_k_children(
-            document,
-            &k_obj,
-            &mut struct_elem,
-            role_map,
-            page_map,
-            deadline,
-            element_count,
-        )?;
+    if let Some(k_obj_raw) = dict.get("K") {
+        // When /K is an indirect reference that resolves to a struct elem dictionary
+        // (as opposed to an array), we lose the object ID after resolve_object and
+        // the Dictionary arm of parse_k_children cannot check for cycles.
+        // Load it here while we still have the reference ID, insert into visited,
+        // and short-circuit if it has already been visited.
+        if let Object::Reference(r) = k_obj_raw {
+            let k_resolved = match document.load_object(*r) {
+                Ok(obj) => obj,
+                Err(e) => {
+                    log::warn!("Failed to load /K reference {}: {}", r.id, e);
+                    return Ok(Some(struct_elem));
+                },
+            };
+            if k_resolved.as_dict().is_some() {
+                // /K points directly at a struct elem — guard against cycles.
+                if !visited.insert(r.id) {
+                    log::warn!(
+                        "Cycle in structure tree: /K object {} already visited, skipping children",
+                        r.id
+                    );
+                    return Ok(Some(struct_elem));
+                }
+            }
+            parse_k_children(
+                document,
+                &k_resolved,
+                &mut struct_elem,
+                role_map,
+                page_map,
+                deadline,
+                element_count,
+                visited,
+            )?;
+        } else {
+            let k_obj = resolve_object(document, k_obj_raw)?;
+            parse_k_children(
+                document,
+                &k_obj,
+                &mut struct_elem,
+                role_map,
+                page_map,
+                deadline,
+                element_count,
+                visited,
+            )?;
+        }
     }
 
     Ok(Some(struct_elem))
@@ -423,6 +474,7 @@ fn parse_k_children(
     page_map: &HashMap<u32, u32>,
     deadline: Deadline,
     element_count: &mut usize,
+    visited: &mut HashSet<u32>,
 ) -> Result<(), Error> {
     match k_obj {
         Object::Integer(mcid) => {
@@ -439,6 +491,20 @@ fn parse_k_children(
                 // Check both time and element count budgets
                 if deadline.is_expired() || *element_count > MAX_STRUCT_ELEMENTS {
                     return Ok(());
+                }
+
+                // Guard against cycles before resolving: an indirect reference that has
+                // already been visited would resolve to a dictionary and slip through to
+                // parse_struct_elem without any ID to check. Capture the ID now, while we
+                // still have the unresolved Reference, so the check happens before loading.
+                if let Object::Reference(obj_ref) = child_obj {
+                    if !visited.insert(obj_ref.id) {
+                        log::warn!(
+                            "Cycle in structure tree: object {} already visited, skipping",
+                            obj_ref.id
+                        );
+                        continue;
+                    }
                 }
 
                 let child_obj = resolve_object(document, child_obj)?;
@@ -461,6 +527,7 @@ fn parse_k_children(
                             page_map,
                             deadline,
                             element_count,
+                            visited,
                         )? {
                             parent.add_child(StructChild::StructElem(Box::new(child_elem)));
                         } else {
@@ -472,6 +539,14 @@ fn parse_k_children(
                     },
 
                     Object::Reference(obj_ref) => {
+                        // Double-indirect reference — guard against cycles here too.
+                        if !visited.insert(obj_ref.id) {
+                            log::warn!(
+                                "Cycle in structure tree: object {} already visited, skipping",
+                                obj_ref.id
+                            );
+                            continue;
+                        }
                         // Resolve indirect reference and try to parse as StructElem
                         match document.load_object(*obj_ref) {
                             Ok(resolved) => {
@@ -482,6 +557,7 @@ fn parse_k_children(
                                     page_map,
                                     deadline,
                                     element_count,
+                                    visited,
                                 )? {
                                     parent.add_child(StructChild::StructElem(Box::new(child_elem)));
                                 } else if let Some(mcr) =
@@ -510,9 +586,15 @@ fn parse_k_children(
 
         Object::Dictionary(_) => {
             // Single dictionary child
-            if let Some(child_elem) =
-                parse_struct_elem(document, k_obj, role_map, page_map, deadline, element_count)?
-            {
+            if let Some(child_elem) = parse_struct_elem(
+                document,
+                k_obj,
+                role_map,
+                page_map,
+                deadline,
+                element_count,
+                visited,
+            )? {
                 parent.add_child(StructChild::StructElem(Box::new(child_elem)));
             } else {
                 // Try parsing as marked content reference
@@ -523,6 +605,14 @@ fn parse_k_children(
         },
 
         Object::Reference(obj_ref) => {
+            // Guard against cycles: skip if this object has already been visited.
+            if !visited.insert(obj_ref.id) {
+                log::warn!(
+                    "Cycle in structure tree: object {} already visited, skipping",
+                    obj_ref.id
+                );
+                return Ok(());
+            }
             // Resolve indirect reference and try to parse as StructElem
             match document.load_object(*obj_ref) {
                 Ok(resolved) => {
@@ -533,6 +623,7 @@ fn parse_k_children(
                         page_map,
                         deadline,
                         element_count,
+                        visited,
                     )? {
                         parent.add_child(StructChild::StructElem(Box::new(child_elem)));
                     } else if let Some(mcr) = parse_marked_content_ref(&resolved, page_map)? {

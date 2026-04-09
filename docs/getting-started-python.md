@@ -352,23 +352,48 @@ for w in words:
     # Access character metadata for the word
     # print(w.chars[0].font_name)
 
+# Optional: override the adaptive word gap threshold (in PDF points).
+# Smaller values split more aggressively; useful for dense forms.
+words = doc.extract_words(0, word_gap_threshold=2.5)
+
 # 4. Line-level extraction (v0.3.14)
 lines = doc.extract_text_lines(0)
 for line in lines:
     print(f"Line: {line.text}")
 
-# 5. Image metadata
+# Optional: override word and/or line gap thresholds (in PDF points).
+lines = doc.extract_text_lines(0, word_gap_threshold=2.5, line_gap_threshold=4.0)
+
+# 5. Inspect computed layout params before overriding
+params = doc.page_layout_params(0)
+print(f"Adaptive word gap: {params.word_gap_threshold:.1f}pt")
+print(f"Adaptive line gap: {params.line_gap_threshold:.1f}pt")
+
+# 6. Pre-tuned extraction profiles for different document types
+from pdf_oxide import ExtractionProfile
+profile = ExtractionProfile.form()
+print(f"Profile: {profile.name}, word_margin_ratio={profile.word_margin_ratio}")
+
+# Pass a profile to extraction methods to control how raw text is parsed
+words = doc.extract_words(0, profile=ExtractionProfile.form())
+lines = doc.extract_text_lines(0, profile=ExtractionProfile.academic())
+
+# Combine profile with threshold overrides (profile controls span parsing,
+# thresholds control word/line clustering)
+words = doc.extract_words(0, word_gap_threshold=1.5, profile=ExtractionProfile.aggressive())
+
+# 7. Image metadata
 images = doc.extract_images(0)
 for img in images:
     print(f"{img['width']}x{img['height']} {img['color_space']}")
 
-# 6. Bookmarks / table of contents
+# 8. Bookmarks / table of contents
 outline = doc.get_outline()  # None if no outline
 if outline:
     for item in outline:
         print(f"{item['title']} -> page {item.get('page')}")
 
-# 7. Vector paths (lines, curves, shapes)
+# 9. Vector paths (lines, curves, shapes)
 paths = doc.extract_paths(0)
 for path in paths:
     print(f"bbox={path['bbox']}, stroke={path.get('stroke_color')}")

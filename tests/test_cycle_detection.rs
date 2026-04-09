@@ -406,3 +406,137 @@ mod circular_xobject {
         );
     }
 }
+
+// --- Cyclic structure tree /K references (SIGSEGV regression) ---
+
+mod struct_tree_cycle {
+    use super::*;
+
+    /// Build a tagged PDF whose structure tree has a two-node cycle:
+    /// StructElem A (obj 5) /K → B (obj 6), StructElem B (obj 6) /K → A (obj 5).
+    fn build_two_node_struct_cycle() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.7\n");
+
+        let obj1 = pdf.len();
+        pdf.extend_from_slice(
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 4 0 R >>\nendobj\n\n",
+        );
+
+        let obj2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n");
+
+        let obj3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n\n",
+        );
+
+        // StructTreeRoot with /K pointing to element A
+        let obj4 = pdf.len();
+        pdf.extend_from_slice(b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n");
+
+        // StructElem A: /K → B (6 0 R)
+        let obj5 = pdf.len();
+        pdf.extend_from_slice(b"5 0 obj\n<< /Type /StructElem /S /P /K 6 0 R >>\nendobj\n\n");
+
+        // StructElem B: /K → A (5 0 R) — creates the cycle
+        let obj6 = pdf.len();
+        pdf.extend_from_slice(b"6 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n");
+
+        finalize_pdf(&mut pdf, &[0, obj1, obj2, obj3, obj4, obj5, obj6]);
+        pdf
+    }
+
+    /// Build a tagged PDF whose structure tree has a self-referencing element:
+    /// StructElem A (obj 5) /K → A (5 0 R).
+    fn build_self_referencing_struct_elem() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.7\n");
+
+        let obj1 = pdf.len();
+        pdf.extend_from_slice(
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 4 0 R >>\nendobj\n\n",
+        );
+
+        let obj2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n");
+
+        let obj3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n\n",
+        );
+
+        let obj4 = pdf.len();
+        pdf.extend_from_slice(b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n");
+
+        // StructElem A: /K → itself (5 0 R)
+        let obj5 = pdf.len();
+        pdf.extend_from_slice(b"5 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n");
+
+        finalize_pdf(&mut pdf, &[0, obj1, obj2, obj3, obj4, obj5]);
+        pdf
+    }
+
+    /// Build a tagged PDF with a three-node structure tree cycle:
+    /// A → B → C → A.
+    fn build_three_node_struct_cycle() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.7\n");
+
+        let obj1 = pdf.len();
+        pdf.extend_from_slice(
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 4 0 R >>\nendobj\n\n",
+        );
+
+        let obj2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n");
+
+        let obj3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n\n",
+        );
+
+        let obj4 = pdf.len();
+        pdf.extend_from_slice(b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n");
+
+        // A → B
+        let obj5 = pdf.len();
+        pdf.extend_from_slice(b"5 0 obj\n<< /Type /StructElem /S /P /K 6 0 R >>\nendobj\n\n");
+
+        // B → C
+        let obj6 = pdf.len();
+        pdf.extend_from_slice(b"6 0 obj\n<< /Type /StructElem /S /P /K 7 0 R >>\nendobj\n\n");
+
+        // C → A (closes the cycle)
+        let obj7 = pdf.len();
+        pdf.extend_from_slice(b"7 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n");
+
+        finalize_pdf(&mut pdf, &[0, obj1, obj2, obj3, obj4, obj5, obj6, obj7]);
+        pdf
+    }
+
+    #[test]
+    fn two_node_struct_cycle_terminates_without_overflow() {
+        let data = build_two_node_struct_cycle();
+        let path = write_temp_pdf(&data, "struct_two_node_cycle.pdf");
+        let mut doc = PdfDocument::open(&path).expect("Should parse PDF structure");
+        // Must not SIGSEGV or hang — the visited-set guard must break the cycle.
+        let _result = doc.extract_text(0);
+    }
+
+    #[test]
+    fn self_referencing_struct_elem_terminates_without_overflow() {
+        let data = build_self_referencing_struct_elem();
+        let path = write_temp_pdf(&data, "struct_self_ref.pdf");
+        let mut doc = PdfDocument::open(&path).expect("Should parse PDF structure");
+        let _result = doc.extract_text(0);
+    }
+
+    #[test]
+    fn three_node_struct_cycle_terminates_without_overflow() {
+        let data = build_three_node_struct_cycle();
+        let path = write_temp_pdf(&data, "struct_three_node_cycle.pdf");
+        let mut doc = PdfDocument::open(&path).expect("Should parse PDF structure");
+        let _result = doc.extract_text(0);
+    }
+}
