@@ -255,8 +255,15 @@ jobs:
           path: wasm-out/
           retention-days: 7
 
-  # Build native shared libraries for language bindings (cdylib)
-  # These are used by Go (CGo), JS (N-API), and C# (P/Invoke)
+  # Build native libraries for language bindings (cdylib + staticlib).
+  # cdylib (.so/.dylib/.dll): C# (P/Invoke), dynamic-linked Node.js
+  # staticlib (.a):           Go CGo (#334), static-linked Node.js (#335)
+  #
+  # The extra windows-gnu rows cross-compile from Linux via mingw-w64 so we
+  # produce a MinGW-compatible `libpdf_oxide.a` that CGo (which uses MinGW
+  # gcc by default) can actually link. MSVC's `pdf_oxide.lib` is a COFF
+  # archive and isn't link-compatible with MinGW gcc, so those targets stay
+  # cdylib-only and feed the C# / dynamic Node.js bindings.
   build-native-libs:
     name: Build native lib (${{ matrix.target }})
     needs: validate
@@ -269,26 +276,38 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: native-linux-x86_64
             lib_name: libpdf_oxide.so
+            staticlib_name: libpdf_oxide.a
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: native-linux-aarch64
             lib_name: libpdf_oxide.so
+            staticlib_name: libpdf_oxide.a
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: native-macos-x86_64
             lib_name: libpdf_oxide.dylib
+            staticlib_name: libpdf_oxide.a
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: native-macos-aarch64
             lib_name: libpdf_oxide.dylib
+            staticlib_name: libpdf_oxide.a
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: native-windows-x86_64
             lib_name: pdf_oxide.dll
+            staticlib_name: pdf_oxide.lib
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             artifact_name: native-windows-aarch64
             lib_name: pdf_oxide.dll
+            staticlib_name: pdf_oxide.lib
+          # Cross-compiled MinGW build — used only by Go CGo on Windows x64.
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            artifact_name: native-windows-x86_64-gnu
+            lib_name: pdf_oxide.dll
+            staticlib_name: libpdf_oxide.a
     steps:
       - uses: actions/checkout@v6
 
@@ -311,16 +330,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Build cdylib
+      - name: Install cross-compilation tools (Windows GNU)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build cdylib + staticlib
         shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ contains(matrix.target, 'aarch64-unknown-linux') && 'aarch64-linux-gnu-gcc' || '' }}
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: ${{ matrix.target == 'x86_64-pc-windows-gnu' && 'x86_64-w64-mingw32-gcc' || '' }}
         run: |
           cargo build --release --lib --target ${{ matrix.target }}
           mkdir -p native-out
+          # Shared library (cdylib) — always present
           cp target/${{ matrix.target }}/release/${{ matrix.lib_name }} native-out/
+          # Static library (staticlib) — produced because Cargo.toml lists
+          # "staticlib" in crate-type. File name differs between MSVC (.lib)
+          # and GNU/Unix (.a).
+          cp target/${{ matrix.target }}/release/${{ matrix.staticlib_name }} native-out/
           # Also copy the C header
           cp include/pdf_oxide_c/pdf_oxide.h native-out/
+          ls -la native-out/
 
       - name: Upload native lib
         uses: actions/upload-artifact@v7
@@ -348,16 +380,27 @@ jobs:
 
       - name: Stage native libs in Go module
         run: |
-          # Map artifact names to Go platform dirs
-          cp native-libs/native-linux-x86_64/libpdf_oxide.so go/lib/linux_amd64/
-          cp native-libs/native-linux-aarch64/libpdf_oxide.so go/lib/linux_arm64/
-          cp native-libs/native-macos-x86_64/libpdf_oxide.dylib go/lib/darwin_amd64/
-          cp native-libs/native-macos-aarch64/libpdf_oxide.dylib go/lib/darwin_arm64/
-          cp native-libs/native-windows-x86_64/pdf_oxide.dll go/lib/windows_amd64/
+          # #334: ship staticlib archives (.a) so Go binaries are self-contained.
+          # Remove any stale shared-library artifacts from previous releases so
+          # git doesn't continue tracking them after the v0.3.25 switch-over.
+          find go/lib -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) -delete
+
+          cp native-libs/native-linux-x86_64/libpdf_oxide.a   go/lib/linux_amd64/
+          cp native-libs/native-linux-aarch64/libpdf_oxide.a  go/lib/linux_arm64/
+          cp native-libs/native-macos-x86_64/libpdf_oxide.a   go/lib/darwin_amd64/
+          cp native-libs/native-macos-aarch64/libpdf_oxide.a  go/lib/darwin_arm64/
+
+          # Windows x64: MinGW-compiled staticlib (from the x86_64-pc-windows-gnu
+          # cross-compile row) — compatible with CGo's default MinGW gcc linker.
+          cp native-libs/native-windows-x86_64-gnu/libpdf_oxide.a go/lib/windows_amd64/
+
+          # Windows ARM64: no supported GNU toolchain yet, stay on dynamic .dll
+          # until gnullvm stabilises. Ship the cdylib from the MSVC build so the
+          # existing fallback CGo directive keeps working.
           cp native-libs/native-windows-aarch64/pdf_oxide.dll go/lib/windows_arm64/ 2>/dev/null || true
 
           echo "=== Go native libs staged ==="
-          find go/lib -type f -not -name ".gitkeep" -not -name "README.md" | sort
+          find go/lib -type f -not -name ".gitkeep" -not -name "README.md" -not -name ".ci-build" | sort
 
       - name: Commit and push native libs
         run: |
@@ -366,7 +409,9 @@ jobs:
           # Marker file is checked by .githooks/pre-commit to distinguish
           # CI-authored native-lib commits from accidental local dev commits.
           echo "$GITHUB_SHA" > go/lib/.ci-build
-          git add go/lib/
+          # -A captures deletions too — important when we switch from .so/.dylib
+          # /.dll to .a and need to drop the old files in the same commit (#334).
+          git add -A go/lib/
           if git diff --cached --quiet; then
             echo "No changes to native libs"
           else
@@ -381,6 +426,66 @@ jobs:
           # Since go.mod is in go/, the tag is go/v{VERSION}
           git tag "go/v${VERSION}"
           git push origin "go/v${VERSION}"
+
+  # Clean-room verification that `go get` works against the just-published tag
+  # across real platforms. This is the gate called out in #334 that would have
+  # caught the v0.3.24 .gitignore/staticlib regression before shipping.
+  verify-go-install:
+    name: Verify go get (${{ matrix.os }})
+    needs: [validate, update-go-native-libs]
+    runs-on: ${{ matrix.os }}
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build a fresh consumer against go/v${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION="${{ needs.validate.outputs.version }}"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+          go mod init verify
+          # Subdirectory-module tag is `go/v<version>` on the git side, but
+          # `go get` consumers still reference it as `@v<version>` — Go's
+          # module resolver translates the prefix automatically.
+          go get "github.com/yfedoseev/pdf_oxide/go@v${VERSION}"
+          cat > main.go <<'EOT'
+          package main
+
+          import (
+            "fmt"
+            "os"
+
+            pdfoxide "github.com/yfedoseev/pdf_oxide/go"
+          )
+
+          func main() {
+            pdf, err := pdfoxide.FromMarkdown("# verify-go-install\n")
+            if err != nil { fmt.Println("fromMarkdown:", err); os.Exit(1) }
+            defer pdf.Close()
+            out := "out.pdf"
+            if err := pdf.Save(out); err != nil { fmt.Println("save:", err); os.Exit(1) }
+
+            doc, err := pdfoxide.Open(out)
+            if err != nil { fmt.Println("open:", err); os.Exit(1) }
+            defer doc.Close()
+            n, err := doc.PageCount()
+            if err != nil { fmt.Println("pageCount:", err); os.Exit(1) }
+            fmt.Printf("ok pages=%d\n", n)
+          }
+          EOT
+          go build -o verify ./...
+          # Prove the binary is self-contained: no runtime lookup of libpdf_oxide.
+          unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH
+          ./verify
 
   # Build Node.js native addon (pdf-oxide npm package)
   build-nodejs:
