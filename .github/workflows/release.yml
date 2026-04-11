@@ -487,9 +487,15 @@ jobs:
           unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH
           ./verify
 
-  # Build Node.js native addon (pdf-oxide npm package)
+  # Build Node.js native addon — one platform subpackage per matrix row (#335).
+  #
+  # Each row downloads the Rust staticlib artifact for its target, stages it
+  # at <repo>/lib/ where js/binding.gyp expects it, runs `node-gyp rebuild` to
+  # produce a real `pdf_oxide.node` addon (this is the step that v0.3.24 never
+  # actually performed), and lays out the result at js/npm/<triple>/ as a
+  # ready-to-publish platform subpackage for the `publish-npm-platforms` job.
   build-nodejs:
-    name: Build Node.js (${{ matrix.artifact_name }})
+    name: Build Node.js (${{ matrix.triple }})
     needs: [validate, build-native-libs]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -497,30 +503,20 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: nodejs-linux-x64
+            triple: linux-x64-gnu
             native_artifact: native-linux-x86_64
-            node_platform: linux
-            node_arch: x64
-          - os: ubuntu-latest
-            artifact_name: nodejs-linux-arm64
+          - os: ubuntu-24.04-arm
+            triple: linux-arm64-gnu
             native_artifact: native-linux-aarch64
-            node_platform: linux
-            node_arch: arm64
           - os: macos-latest
-            artifact_name: nodejs-macos-x64
+            triple: darwin-x64
             native_artifact: native-macos-x86_64
-            node_platform: darwin
-            node_arch: x64
           - os: macos-latest
-            artifact_name: nodejs-macos-arm64
+            triple: darwin-arm64
             native_artifact: native-macos-aarch64
-            node_platform: darwin
-            node_arch: arm64
           - os: windows-latest
-            artifact_name: nodejs-windows-x64
+            triple: win32-x64-msvc
             native_artifact: native-windows-x86_64
-            node_platform: win32
-            node_arch: x64
     steps:
       - uses: actions/checkout@v6
 
@@ -529,35 +525,55 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Download native library
+      - name: Download Rust staticlib artifact
         uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.native_artifact }}
-          path: js/build/Release/
+          path: lib/
 
-      - name: Prepare npm package
+      - name: Install npm dependencies (no optional platform packages)
+        working-directory: js
+        shell: bash
+        # --omit=optional skips the pdf_oxide-<triple> packages listed as
+        # optionalDependencies — they don't exist in the registry yet at build
+        # time (we're about to publish them), and we don't need them to build.
+        run: npm install --omit=optional --ignore-scripts
+
+      - name: Build native addon with node-gyp
+        working-directory: js
+        shell: bash
+        run: |
+          ls -la ../lib/
+          npx node-gyp rebuild
+          ls -la build/Release/
+
+      - name: Stage platform subpackage
         working-directory: js
         shell: bash
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
-          # Bundle the native lib, JS wrapper, and type definitions
-          mkdir -p dist
-          cp build/Release/* dist/ 2>/dev/null || true
-          cp pdf_oxide.js dist/
-          cp pdf_oxide.d.ts dist/
-          cp index.js dist/ 2>/dev/null || true
-          cp index.d.ts dist/ 2>/dev/null || true
-          cp package.json dist/
-          cp binding.cc dist/ 2>/dev/null || true
-          # Create platform-specific tarball
-          cd dist
-          tar czf ../${{ matrix.artifact_name }}-${VERSION}.tar.gz .
+          TRIPLE="${{ matrix.triple }}"
+          SUBPKG="npm/${TRIPLE}"
+          test -d "$SUBPKG" || { echo "missing $SUBPKG template"; exit 1; }
+          # Rename the default pdf_oxide.node output to the triple-qualified
+          # name that the subpackage's package.json "main" field references.
+          cp build/Release/pdf_oxide.node "$SUBPKG/pdf_oxide.${TRIPLE}.node"
+          # Version is templated to 0.3.25 in the committed package.json; if
+          # the release version differs, sync it with a minimal in-place edit.
+          node -e "
+            const fs = require('fs');
+            const p = '$SUBPKG/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            pkg.version = '${VERSION}';
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          "
+          ls -la "$SUBPKG/"
 
-      - name: Upload Node.js package
+      - name: Upload platform subpackage
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
-          path: js/${{ matrix.artifact_name }}-*.tar.gz
+          name: nodejs-${{ matrix.triple }}
+          path: js/npm/${{ matrix.triple }}/
           retention-days: 7
 
   # Build C# NuGet package
@@ -971,10 +987,58 @@ jobs:
           git commit -m "Update pdf-oxide to ${{ needs.validate.outputs.version }}"
           git push
 
-  # Publish Node.js native package to npm (pdf-oxide)
+  # (#335) Publish per-platform Node.js native subpackages to npm. Each one
+  # contains a single prebuilt .node file plus a minimal package.json with
+  # the right `os`/`cpu`/`libc` fields so npm only resolves it on matching
+  # platforms. The main `pdf-oxide` package declares these as
+  # `optionalDependencies` so end users get the right binding automatically,
+  # with zero install-time compilation.
+  publish-npm-platforms:
+    name: Publish platform subpackage (${{ matrix.triple }})
+    needs: [validate, build-nodejs, create-release]
+    runs-on: ubuntu-latest
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        triple:
+          - linux-x64-gnu
+          - linux-arm64-gnu
+          - darwin-x64
+          - darwin-arm64
+          - win32-x64-msvc
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download subpackage artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: nodejs-${{ matrix.triple }}
+          path: subpkg
+
+      - name: Show contents
+        run: ls -la subpkg/
+
+      - name: Publish subpackage
+        working-directory: subpkg
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # (#335) Publish the main `pdf-oxide` package. Runs after every platform
+  # subpackage has been published so that the `optionalDependencies` resolve
+  # cleanly for end users on the first post-release install. The published
+  # tarball ships only compiled `lib/`, type definitions, and README — no C++
+  # source, no binding.gyp, no install-time build hook. `npm publish` invokes
+  # the `prepack` script which runs `tsc` + the ESM-import fixer on the
+  # publishing machine (never on end-user machines).
   publish-npm-native:
     name: Publish to npm (pdf-oxide)
-    needs: [validate, build-nodejs, create-release]
+    needs: [validate, publish-npm-platforms, create-release]
     runs-on: ubuntu-latest
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
     steps:
@@ -986,11 +1050,66 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Install devDependencies (TypeScript etc.)
+        working-directory: js
+        run: npm install --omit=optional --ignore-scripts
+
       - name: Publish to npm
         working-directory: js
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # (#335) Clean-room install verification — the gate that would have caught
+  # v0.3.24 before it shipped. Spins up fresh project directories on Linux and
+  # macOS, runs `npm install pdf-oxide@<version>` with no devDependencies /
+  # Python / C++ toolchain on the runner, and executes a trivial
+  # FromMarkdown → Open → extractText flow. If this job fails, the release is
+  # broken and the npm packages should be `npm unpublish`'d within the 72-hour
+  # window.
+  verify-npm-install:
+    name: Verify npm install (${{ matrix.os }})
+    needs: [validate, publish-npm-native]
+    runs-on: ${{ matrix.os }}
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Clean-room install + smoke test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION="${{ needs.validate.outputs.version }}"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+          npm init -y
+          time npm install "pdf-oxide@${VERSION}"
+          cat > test.mjs <<'EOT'
+          import { Pdf, PdfDocument } from 'pdf-oxide';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          const out = join(tmpdir(), 'verify-npm-install.pdf');
+          const pdf = Pdf.fromMarkdown('# verify-npm-install\n\nbody text.');
+          pdf.save(out);
+          pdf.close?.();
+          const doc = PdfDocument.open(out);
+          try {
+            const n = doc.pageCount();
+            const text = String(doc.extractText(0) ?? '').slice(0, 40);
+            console.log(`ok pages=${n} text=${JSON.stringify(text)}`);
+            if (n < 1) { throw new Error('expected at least 1 page'); }
+          } finally {
+            doc.close?.();
+          }
+          EOT
+          node test.mjs
 
   # Publish C# NuGet package
   publish-nuget:

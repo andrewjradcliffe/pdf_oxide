@@ -196,6 +196,11 @@ pnpm-lock.yaml
 # Node modules (for WASM examples)
 node_modules/
 
+# Node native addons — always built in CI, never committed to git.
+# The js/npm/<triple>/*.node files are populated by the build-nodejs
+# job in release.yml and live only in build artifacts (#335).
+*.node
+
 # Build artifacts
 *.o
 *.a
