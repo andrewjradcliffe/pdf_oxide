@@ -266,10 +266,25 @@ impl TextRasterizer {
             bytes.iter().map(|&b| char::from(b)).collect()
         };
 
-        // Filter control characters from failed encoding resolution
+        // Filter control characters from failed encoding resolution,
+        // and expand presentation-form ligature code points (fi, fl, ffi,
+        // ffl, st, ct, …) into their component letters so the shaper
+        // passes the cluster through as ordinary glyphs instead of
+        // dropping it or producing a lone box. `extract_text` already
+        // does this on the extraction path via
+        // `ligature_processor::get_ligature_components`; without the
+        // same decomposition on the render path, words like
+        // "Efficient" rasterize as "Effi  ert" because the shaper can't
+        // resolve the ligature cluster against the fallback system
+        // font. See issue #331 (R2).
         let mut filtered = String::with_capacity(raw_result.len());
         for c in raw_result.chars() {
-            if c >= '\x20' || c == '\t' || c == '\n' || c == '\r' {
+            if c < '\x20' && c != '\t' && c != '\n' && c != '\r' {
+                continue;
+            }
+            if let Some(components) = crate::text::ligature_processor::get_ligature_components(c) {
+                filtered.push_str(components);
+            } else {
                 filtered.push(c);
             }
         }
@@ -635,19 +650,49 @@ impl TextRasterizer {
             // Map cluster (Unicode byte offset) to character index
             let char_idx = cluster_to_char_idx.get(&cluster).copied().unwrap_or(0);
 
+            // Determine how many *source* characters this glyph represents.
+            // For normal 1:1 glyphs, cluster_chars == 1. For shaped
+            // ligatures like the "ffi" glyph (#331 R2), one glyph covers
+            // multiple characters and rustybuzz reports them with the
+            // same cluster index on every glyph of the cluster. Since we
+            // advance the output cursor by the sum of the PDF-declared
+            // widths of the *source* characters (per PDF §9.2.4 text-
+            // showing advance), we must add the widths of every source
+            // character in the ligature cluster to the cursor, not just
+            // the first character's width. Otherwise a ligature glyph
+            // draws wide but only advances by one character's worth, and
+            // subsequent glyphs overwrite the tail of the ligature —
+            // exactly the `Efficient` → `Effi ert` symptom reported in
+            // #331 on arxiv-style LaTeX-embedded fonts.
+            let next_cluster_byte: usize = info
+                .get(i + 1)
+                .map(|n| n.cluster as usize)
+                .unwrap_or(text.len());
+            let cluster_chars: usize = text[cluster..next_cluster_byte.min(text.len())]
+                .chars()
+                .count()
+                .max(1);
+
             // PDF Spec: tx = ((w0 * Tfs) + Tc + Tw) * Th
             // Priority:
-            // 1. Explicit /W or /DW from FontInfo (in 1000ths of em)
-            // 2. Shaped advance from rustybuzz (fallback)
-            let pdf_width = if let Some(info) = font_info {
-                let char_code = if info.subtype == "Type0" {
-                    // For Type0 fonts, use character index to look up CID
-                    *cids.get(char_idx).unwrap_or(&0)
-                } else {
-                    // For simple fonts, use the raw byte at the corresponding position
-                    *bytes.get(char_idx).unwrap_or(&0) as u16
-                };
-                info.get_glyph_width(char_code)
+            // 1. Explicit /W or /DW from FontInfo (in 1000ths of em),
+            //    summed across every source character in the cluster
+            //    so ligatures advance by the full cluster's width.
+            // 2. Shaped advance from rustybuzz (fallback, already
+            //    reflects the ligature's real width because it comes
+            //    from the font's horizontal metrics table).
+            let pdf_width = if let Some(font_info_ref) = font_info {
+                let mut sum = 0.0_f32;
+                for k in 0..cluster_chars {
+                    let idx = char_idx + k;
+                    let char_code = if font_info_ref.subtype == "Type0" {
+                        *cids.get(idx).unwrap_or(&0)
+                    } else {
+                        *bytes.get(idx).unwrap_or(&0) as u16
+                    };
+                    sum += font_info_ref.get_glyph_width(char_code);
+                }
+                sum
             } else {
                 // No FontInfo, use shaped advance
                 pos[i].x_advance as f32 / font_size * 1000.0
