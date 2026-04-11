@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""PDF text-extraction regression harness for pdf_oxide.
+"""PDF extraction regression harness for pdf_oxide.
 
-Compares the HEAD build of ``extract_text_simple`` against the v0.3.23
-baseline and external references (pdftotext, pypdfium2) on a curated
-corpus of ~60 PDFs. Used to investigate whether commits on
-``release/v0.3.25`` have regressed output quality versus v0.3.23, and
-whether fixes for issues #313-316 match ground truth produced by
-pdftotext / pdfium.
+Compares the HEAD build of pdf_oxide's ``extract_text_simple``,
+``extract_markdown_simple``, and ``extract_html_simple`` against the
+v0.3.23 baseline and external references (pdftotext, pypdfium2,
+pymupdf4llm) on a curated corpus of ~60 PDFs. Used to investigate
+whether commits on ``release/v0.3.25`` have regressed output quality
+versus v0.3.23 across all three extraction formats (text, markdown,
+html).
 
 Subcommands:
   collect      Select a diverse corpus and write regression_corpus.txt
-  run          Run every extractor on every PDF, save outputs + manifest
-  diff         Compare HEAD vs the v0.3.23 baseline from a run
+  run          Run every (extractor, format) combo on every PDF
+  diff         Compare HEAD vs baseline in a given format
   groundtruth  Compare an extractor against pdftotext (or another ref)
-  show         Dump all four extractors' output for a single PDF
+  show         Dump the selected format's output for a single PDF
 
-The script is self-contained: stdlib + (optional) pypdfium2, plus
-subprocess calls to pdftotext and two extract_text_simple binaries.
+The script is self-contained: stdlib + (optional) pypdfium2 /
+pymupdf4llm, plus subprocess calls to pdftotext and the
+extract_{text,markdown,html}_simple binaries.
 """
 
 from __future__ import annotations
@@ -31,10 +33,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -50,13 +53,21 @@ RUNS_ROOT_DEFAULT = Path("/tmp/regression_runs")
 TESTS_ROOT = Path(os.path.expanduser("~/projects/pdf_oxide_tests"))
 REPRO_ROOT = Path("/tmp/repro_pdfs")
 
-BASELINE_BIN = Path("/tmp/pdf_oxide_v0323/target/release/examples/extract_text_simple")
-HEAD_BIN = REPO_ROOT / "target" / "release" / "examples" / "extract_text_simple"
+V0323_EXAMPLES = Path("/tmp/pdf_oxide_v0323/target/release/examples")
+HEAD_EXAMPLES = REPO_ROOT / "target" / "release" / "examples"
 
 PDFTOTEXT_BIN = "/usr/bin/pdftotext"
 
 MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MB
 EXTRACTOR_TIMEOUT = 30  # seconds
+
+FORMATS: Tuple[str, ...] = ("text", "markdown", "html")
+
+FORMAT_EXT: Dict[str, str] = {
+    "text": ".txt",
+    "markdown": ".md",
+    "html": ".html",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -65,32 +76,350 @@ EXTRACTOR_TIMEOUT = 30  # seconds
 
 
 @dataclass
-class Extractor:
-    name: str
-    kind: str  # "rust" | "pdftotext" | "pypdfium2"
-    binary: Optional[Path] = None
+class ExtractorSpec:
+    """One (extractor, format) combination.
 
-    def available(self) -> bool:
-        if self.kind == "rust":
-            return self.binary is not None and self.binary.exists()
-        if self.kind == "pdftotext":
-            return Path(PDFTOTEXT_BIN).exists()
-        if self.kind == "pypdfium2":
+    ``runner`` is a callable ``(pdf: Path, pages: int) -> (ok, rc, text,
+    err)`` that produces a UTF-8 string to be persisted.  ``available``
+    is a zero-arg availability check that reports whether this combo
+    can be executed on the current machine.  When the combo is
+    unavailable ``unavail_reason`` explains why (e.g. "binary not
+    found at X" or "module not installed").
+    """
+
+    name: str          # logical extractor name, e.g. "head", "v0323"
+    format: str        # "text" | "markdown" | "html"
+    runner: Callable[[Path, int], Tuple[bool, Optional[int], str, Optional[str]]]
+    available: Callable[[], bool]
+    unavail_reason: Callable[[], str]
+    file_ext: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.name}.{self.format}"
+
+
+# ---- helper runners for rust binaries -------------------------------------
+
+
+def _run_rust_bin(binary: Path, pdf: Path) -> Tuple[bool, Optional[int], str, Optional[str]]:
+    try:
+        proc = subprocess.run(
+            [str(binary), str(pdf)],
+            capture_output=True,
+            timeout=EXTRACTOR_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, "", "timeout"
+    except Exception as e:  # pragma: no cover
+        return False, None, "", f"exception: {e}"
+    ok = proc.returncode == 0
+    try:
+        text = proc.stdout.decode("utf-8", errors="replace")
+    except Exception as e:
+        return False, proc.returncode, "", f"decode error: {e}"
+    err = None
+    if not ok:
+        err = (
+            proc.stderr.decode("utf-8", errors="replace")[-4000:]
+            or f"exit {proc.returncode}"
+        )
+    return ok, proc.returncode, text, err
+
+
+def _make_rust_runner(binary: Path) -> Callable[[Path, int], Tuple[bool, Optional[int], str, Optional[str]]]:
+    def runner(pdf: Path, pages: int) -> Tuple[bool, Optional[int], str, Optional[str]]:
+        return _run_rust_bin(binary, pdf)
+
+    return runner
+
+
+def _binary_available(binary: Path) -> Callable[[], bool]:
+    return lambda: binary.exists()
+
+
+def _binary_unavail(binary: Path) -> Callable[[], str]:
+    return lambda: f"binary not found at {binary}"
+
+
+# ---- pdftotext runners (text + html) --------------------------------------
+
+
+def _run_pdftotext_text(pdf: Path, pages: int) -> Tuple[bool, Optional[int], str, Optional[str]]:
+    cmd: List[str] = [PDFTOTEXT_BIN, "-layout"]
+    if pages > 0:
+        cmd += ["-f", "1", "-l", str(pages)]
+    cmd += [str(pdf), "-"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=EXTRACTOR_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, None, "", "timeout"
+    except Exception as e:
+        return False, None, "", f"exception: {e}"
+    if proc.returncode != 0 and pages > 0:
+        # Retry without page flags — some poppler builds reject them on
+        # some encrypted PDFs.
+        try:
+            proc = subprocess.run(
+                [PDFTOTEXT_BIN, "-layout", str(pdf), "-"],
+                capture_output=True,
+                timeout=EXTRACTOR_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return False, None, "", "timeout"
+        except Exception as e:
+            return False, None, "", f"exception: {e}"
+    ok = proc.returncode == 0
+    text = proc.stdout.decode("utf-8", errors="replace")
+    err = None
+    if not ok:
+        err = (
+            proc.stderr.decode("utf-8", errors="replace")[-4000:]
+            or f"exit {proc.returncode}"
+        )
+    return ok, proc.returncode, text, err
+
+
+def _run_pdftotext_html(pdf: Path, pages: int) -> Tuple[bool, Optional[int], str, Optional[str]]:
+    # pdftotext -htmlmeta writes to a file argument, not stdout.
+    with tempfile.TemporaryDirectory(prefix="pdftotext_html_") as tmp:
+        out_file = Path(tmp) / "out.html"
+        cmd: List[str] = [PDFTOTEXT_BIN, "-layout", "-htmlmeta"]
+        if pages > 0:
+            cmd += ["-f", "1", "-l", str(pages)]
+        cmd += [str(pdf), str(out_file)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=EXTRACTOR_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return False, None, "", "timeout"
+        except Exception as e:
+            return False, None, "", f"exception: {e}"
+        if proc.returncode != 0 and pages > 0:
             try:
-                import pypdfium2  # noqa: F401
-            except Exception:
-                return False
-            return True
+                proc = subprocess.run(
+                    [PDFTOTEXT_BIN, "-layout", "-htmlmeta", str(pdf), str(out_file)],
+                    capture_output=True,
+                    timeout=EXTRACTOR_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                return False, None, "", "timeout"
+            except Exception as e:
+                return False, None, "", f"exception: {e}"
+        ok = proc.returncode == 0 and out_file.exists()
+        if not ok:
+            err = (
+                proc.stderr.decode("utf-8", errors="replace")[-4000:]
+                or f"exit {proc.returncode}"
+            )
+            return False, proc.returncode, "", err
+        try:
+            text = out_file.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return False, proc.returncode, "", f"read error: {e}"
+        return True, proc.returncode, text, None
+
+
+def _pdftotext_available() -> bool:
+    return Path(PDFTOTEXT_BIN).exists()
+
+
+def _pdftotext_unavail() -> str:
+    return f"pdftotext binary not found at {PDFTOTEXT_BIN}"
+
+
+# ---- pypdfium2 runner (text only) -----------------------------------------
+
+
+def _run_pypdfium2(pdf: Path, pages: int) -> Tuple[bool, Optional[int], str, Optional[str]]:
+    try:
+        import pypdfium2 as pdfium  # type: ignore
+    except Exception as e:
+        return False, None, "", f"import error: {e}"
+    start = time.time()
+    try:
+        doc = pdfium.PdfDocument(str(pdf))
+        total = len(doc)
+        last = total if pages <= 0 else min(total, pages)
+        chunks: List[str] = []
+        for i in range(last):
+            if time.time() - start > EXTRACTOR_TIMEOUT:
+                return False, None, "", "timeout"
+            page = doc[i]
+            tp = page.get_textpage()
+            try:
+                chunks.append(tp.get_text_range())
+            finally:
+                try:
+                    tp.close()
+                except Exception:
+                    pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
+        try:
+            doc.close()
+        except Exception:
+            pass
+        return True, 0, "\n".join(chunks), None
+    except Exception as e:
+        return False, None, "", f"exception: {e}"
+
+
+def _pypdfium2_available() -> bool:
+    try:
+        import pypdfium2  # noqa: F401
+    except Exception:
         return False
+    return True
 
 
-def build_extractors() -> List[Extractor]:
-    return [
-        Extractor("v0323", "rust", BASELINE_BIN),
-        Extractor("head", "rust", HEAD_BIN),
-        Extractor("pdftotext", "pdftotext"),
-        Extractor("pypdfium2", "pypdfium2"),
+def _pypdfium2_unavail() -> str:
+    try:
+        import pypdfium2  # noqa: F401
+    except Exception as e:
+        return f"pypdfium2 import error: {e}"
+    return "pypdfium2 unavailable"
+
+
+# ---- pymupdf4llm runner (markdown only) -----------------------------------
+
+
+def _run_pymupdf4llm(pdf: Path, pages: int) -> Tuple[bool, Optional[int], str, Optional[str]]:
+    try:
+        import pymupdf4llm  # type: ignore
+    except Exception as e:
+        return False, None, "", f"import error: {e}"
+    try:
+        # pymupdf4llm.to_markdown may or may not accept pages kwarg.
+        if pages > 0:
+            try:
+                text = pymupdf4llm.to_markdown(str(pdf), pages=list(range(pages)))
+            except TypeError:
+                text = pymupdf4llm.to_markdown(str(pdf))
+        else:
+            text = pymupdf4llm.to_markdown(str(pdf))
+        if text is None:
+            text = ""
+        return True, 0, text, None
+    except Exception as e:
+        return False, None, "", f"exception: {e}"
+
+
+def _pymupdf4llm_available() -> bool:
+    try:
+        import pymupdf4llm  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _pymupdf4llm_unavail() -> str:
+    try:
+        import pymupdf4llm  # noqa: F401
+    except Exception as e:
+        return f"pymupdf4llm import error: {e}"
+    return "pymupdf4llm unavailable"
+
+
+# ---- catalogue factory ----------------------------------------------------
+
+
+def build_extractor_specs() -> List[ExtractorSpec]:
+    head_text = HEAD_EXAMPLES / "extract_text_simple"
+    head_md = HEAD_EXAMPLES / "extract_markdown_simple"
+    head_html = HEAD_EXAMPLES / "extract_html_simple"
+
+    v0323_text = V0323_EXAMPLES / "extract_text_simple"
+    v0323_md = V0323_EXAMPLES / "extract_markdown_simple"
+    v0323_html = V0323_EXAMPLES / "extract_html_simple"
+
+    specs: List[ExtractorSpec] = [
+        # ---- text ---------------------------------------------------------
+        ExtractorSpec(
+            name="v0323",
+            format="text",
+            runner=_make_rust_runner(v0323_text),
+            available=_binary_available(v0323_text),
+            unavail_reason=_binary_unavail(v0323_text),
+            file_ext=FORMAT_EXT["text"],
+        ),
+        ExtractorSpec(
+            name="head",
+            format="text",
+            runner=_make_rust_runner(head_text),
+            available=_binary_available(head_text),
+            unavail_reason=_binary_unavail(head_text),
+            file_ext=FORMAT_EXT["text"],
+        ),
+        ExtractorSpec(
+            name="pdftotext",
+            format="text",
+            runner=_run_pdftotext_text,
+            available=_pdftotext_available,
+            unavail_reason=_pdftotext_unavail,
+            file_ext=FORMAT_EXT["text"],
+        ),
+        ExtractorSpec(
+            name="pypdfium2",
+            format="text",
+            runner=_run_pypdfium2,
+            available=_pypdfium2_available,
+            unavail_reason=_pypdfium2_unavail,
+            file_ext=FORMAT_EXT["text"],
+        ),
+        # ---- markdown -----------------------------------------------------
+        ExtractorSpec(
+            name="v0323",
+            format="markdown",
+            runner=_make_rust_runner(v0323_md),
+            available=_binary_available(v0323_md),
+            unavail_reason=_binary_unavail(v0323_md),
+            file_ext=FORMAT_EXT["markdown"],
+        ),
+        ExtractorSpec(
+            name="head",
+            format="markdown",
+            runner=_make_rust_runner(head_md),
+            available=_binary_available(head_md),
+            unavail_reason=_binary_unavail(head_md),
+            file_ext=FORMAT_EXT["markdown"],
+        ),
+        ExtractorSpec(
+            name="pymupdf4llm",
+            format="markdown",
+            runner=_run_pymupdf4llm,
+            available=_pymupdf4llm_available,
+            unavail_reason=_pymupdf4llm_unavail,
+            file_ext=FORMAT_EXT["markdown"],
+        ),
+        # ---- html ---------------------------------------------------------
+        ExtractorSpec(
+            name="v0323",
+            format="html",
+            runner=_make_rust_runner(v0323_html),
+            available=_binary_available(v0323_html),
+            unavail_reason=_binary_unavail(v0323_html),
+            file_ext=FORMAT_EXT["html"],
+        ),
+        ExtractorSpec(
+            name="head",
+            format="html",
+            runner=_make_rust_runner(head_html),
+            available=_binary_available(head_html),
+            unavail_reason=_binary_unavail(head_html),
+            file_ext=FORMAT_EXT["html"],
+        ),
+        ExtractorSpec(
+            name="pdftotext",
+            format="html",
+            runner=_run_pdftotext_html,
+            available=_pdftotext_available,
+            unavail_reason=_pdftotext_unavail,
+            file_ext=FORMAT_EXT["html"],
+        ),
     ]
+    return specs
 
 
 # ---------------------------------------------------------------------------
@@ -138,16 +467,7 @@ def _first_n(paths: Iterable[Path], n: int, seen: set) -> List[Path]:
 
 
 def collect_corpus(output: Path) -> Dict[str, List[Path]]:
-    """Deterministically pick a diverse ~60-PDF corpus.
-
-    Buckets:
-      - single_column        10 (RFCs, theses, EU docs)
-      - multi_column         10 (arxiv / academic / technical)
-      - datasheet_form       10 (orafol_*, irs forms, tables, labels)
-      - cjk_complex          10 (CJK diverse + cn_*, ws779)
-      - encrypted_pdfjs      10 (pdfs_pdfjs/*)
-      - random_pdfs          10 (random from pdfs/ fallback pool)
-    """
+    """Deterministically pick a diverse ~60-PDF corpus."""
 
     seen: set = set()
     buckets: Dict[str, Bucket] = {}
@@ -157,13 +477,10 @@ def collect_corpus(output: Path) -> Dict[str, List[Path]]:
         buckets[name] = b
         return b
 
-    # -- single-column body text --------------------------------------------
     single = add_bucket("single_column", 10)
     diverse = _walk_pdfs(TESTS_ROOT / "pdfs" / "diverse")
     theses = _walk_pdfs(TESTS_ROOT / "pdfs" / "theses")
     text_heavy = _walk_pdfs(TESTS_ROOT / "pdfs" / "text_heavy")
-
-    # Prefer obvious single-column names first.
     single_seeds: List[Path] = []
     for p in diverse + theses + text_heavy:
         name = p.name.lower()
@@ -172,7 +489,6 @@ def collect_corpus(output: Path) -> Dict[str, List[Path]]:
     single.candidates = single_seeds + diverse + theses + text_heavy
     single.picked = _first_n(single.candidates, single.target, seen)
 
-    # -- multi-column academic papers ---------------------------------------
     multi = add_bucket("multi_column", 10)
     academic = _walk_pdfs(TESTS_ROOT / "pdfs" / "academic")
     technical = _walk_pdfs(TESTS_ROOT / "pdfs" / "technical")
@@ -182,7 +498,6 @@ def collect_corpus(output: Path) -> Dict[str, List[Path]]:
     multi.candidates = academic + technical + arxiv_elsewhere
     multi.picked = _first_n(multi.candidates, multi.target, seen)
 
-    # -- datasheets / forms / label-value -----------------------------------
     ds = add_bucket("datasheet_form", 10)
     repro_orafol = sorted(REPRO_ROOT.glob("orafol_*.pdf"))
     forms = _walk_pdfs(TESTS_ROOT / "pdfs" / "forms")
@@ -191,7 +506,6 @@ def collect_corpus(output: Path) -> Dict[str, List[Path]]:
     ds.candidates = repro_orafol + forms + tables + irs
     ds.picked = _first_n(ds.candidates, ds.target, seen)
 
-    # -- CJK / complex scripts ----------------------------------------------
     cjk = add_bucket("cjk_complex", 10)
     cn_repro = sorted(REPRO_ROOT.glob("cn_*.pdf")) + sorted(
         REPRO_ROOT.glob("cancer_lab_tests_zh.pdf")
@@ -208,12 +522,10 @@ def collect_corpus(output: Path) -> Dict[str, List[Path]]:
     cjk.candidates = cn_repro + diverse_cjk + multilingual
     cjk.picked = _first_n(cjk.candidates, cjk.target, seen)
 
-    # -- encrypted / pdfjs regression ---------------------------------------
     pdfjs = add_bucket("encrypted_pdfjs", 10)
     pdfjs.candidates = _walk_pdfs(TESTS_ROOT / "pdfs_pdfjs")
     pdfjs.picked = _first_n(pdfjs.candidates, pdfjs.target, seen)
 
-    # -- random from pdfs/ for baseline coverage ----------------------------
     rnd = add_bucket("random_pdfs", 10)
     all_pdfs = _walk_pdfs(TESTS_ROOT / "pdfs")
     rng = random.Random(0xC0FFEE)
@@ -222,7 +534,6 @@ def collect_corpus(output: Path) -> Dict[str, List[Path]]:
     rnd.candidates = shuffled
     rnd.picked = _first_n(rnd.candidates, rnd.target, seen)
 
-    # -- Top up any short bucket from peer buckets (never from pdfs_slow) ---
     peer_map = {
         "single_column": ["random_pdfs", "multi_column", "datasheet_form"],
         "multi_column": ["random_pdfs", "single_column", "datasheet_form"],
@@ -242,7 +553,6 @@ def collect_corpus(output: Path) -> Dict[str, List[Path]]:
             extras = _first_n(peer.candidates, need, seen)
             bucket.picked.extend(extras)
 
-    # -- Write the corpus file ----------------------------------------------
     output.parent.mkdir(parents=True, exist_ok=True)
     lines: List[str] = []
     for bucket in buckets.values():
@@ -272,110 +582,6 @@ def load_corpus(path: Path) -> List[Tuple[str, Path]]:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ExtractionResult:
-    extractor: str
-    pdf: Path
-    out_path: Path
-    ok: bool
-    returncode: Optional[int]
-    elapsed: float
-    bytes: int
-    lines: int
-    error: Optional[str]
-
-
-def _run_rust(ext: Extractor, pdf: Path) -> Tuple[bool, Optional[int], str, Optional[str]]:
-    assert ext.binary is not None
-    try:
-        proc = subprocess.run(
-            [str(ext.binary), str(pdf)],
-            capture_output=True,
-            timeout=EXTRACTOR_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return False, None, "", "timeout"
-    except Exception as e:  # pragma: no cover - unexpected
-        return False, None, "", f"exception: {e}"
-    ok = proc.returncode == 0
-    try:
-        text = proc.stdout.decode("utf-8", errors="replace")
-    except Exception as e:
-        return False, proc.returncode, "", f"decode error: {e}"
-    err = None
-    if not ok:
-        err = proc.stderr.decode("utf-8", errors="replace")[-4000:] or f"exit {proc.returncode}"
-    return ok, proc.returncode, text, err
-
-
-def _run_pdftotext(pdf: Path, pages: int) -> Tuple[bool, Optional[int], str, Optional[str]]:
-    cmd: List[str] = [PDFTOTEXT_BIN, "-layout"]
-    if pages > 0:
-        cmd += ["-f", "1", "-l", str(pages)]
-    cmd += [str(pdf), "-"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=EXTRACTOR_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return False, None, "", "timeout"
-    except Exception as e:  # pragma: no cover
-        return False, None, "", f"exception: {e}"
-    if proc.returncode != 0 and pages > 0:
-        # Retry without page flags — some poppler builds reject them on
-        # some PDFs (e.g. encrypted with unusual metadata).
-        try:
-            proc = subprocess.run(
-                [PDFTOTEXT_BIN, "-layout", str(pdf), "-"],
-                capture_output=True,
-                timeout=EXTRACTOR_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            return False, None, "", "timeout"
-        except Exception as e:  # pragma: no cover
-            return False, None, "", f"exception: {e}"
-    ok = proc.returncode == 0
-    text = proc.stdout.decode("utf-8", errors="replace")
-    err = None
-    if not ok:
-        err = proc.stderr.decode("utf-8", errors="replace")[-4000:] or f"exit {proc.returncode}"
-    return ok, proc.returncode, text, err
-
-
-def _run_pypdfium2(pdf: Path, pages: int) -> Tuple[bool, Optional[int], str, Optional[str]]:
-    try:
-        import pypdfium2 as pdfium  # type: ignore
-    except Exception as e:
-        return False, None, "", f"import error: {e}"
-    start = time.time()
-    try:
-        doc = pdfium.PdfDocument(str(pdf))
-        total = len(doc)
-        last = total if pages <= 0 else min(total, pages)
-        chunks: List[str] = []
-        for i in range(last):
-            if time.time() - start > EXTRACTOR_TIMEOUT:
-                return False, None, "", "timeout"
-            page = doc[i]
-            tp = page.get_textpage()
-            try:
-                chunks.append(tp.get_text_range())
-            finally:
-                try:
-                    tp.close()
-                except Exception:
-                    pass
-                try:
-                    page.close()
-                except Exception:
-                    pass
-        try:
-            doc.close()
-        except Exception:
-            pass
-        return True, 0, "\n".join(chunks), None
-    except Exception as e:
-        return False, None, "", f"exception: {e}"
-
-
 def _relative_key(pdf: Path) -> str:
     """Produce a deterministic, filesystem-safe path for saving output."""
     try:
@@ -400,7 +606,7 @@ DIAGNOSTIC_STRINGS = [
     "Page 1 of",
     "rowspan",
     "colspan",
-    "\ufeff",  # BOM, sometimes leaks into output
+    "\ufeff",  # BOM
 ]
 
 
@@ -419,75 +625,117 @@ def run_all(
     out_dir: Path,
     pages: int,
     force: bool,
+    formats: Sequence[str],
 ) -> Dict:
     out_dir.mkdir(parents=True, exist_ok=True)
-    extractors = build_extractors()
-    available = [e for e in extractors if e.available()]
-    missing = [e.name for e in extractors if not e.available()]
-    if missing:
-        print(f"[warn] extractors unavailable: {', '.join(missing)}", file=sys.stderr)
+    all_specs = build_extractor_specs()
+
+    # Group specs by format, honouring the --formats filter.
+    specs_by_format: Dict[str, List[ExtractorSpec]] = {f: [] for f in formats}
+    for spec in all_specs:
+        if spec.format in specs_by_format:
+            specs_by_format[spec.format].append(spec)
 
     manifest: Dict = {
         "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "out_dir": str(out_dir),
         "pages": pages,
-        "baseline_bin": str(BASELINE_BIN),
-        "head_bin": str(HEAD_BIN),
-        "extractors": [e.name for e in available],
-        "missing_extractors": missing,
-        "pdfs": [],
+        "v0323_examples": str(V0323_EXAMPLES),
+        "head_examples": str(HEAD_EXAMPLES),
+        "requested_formats": list(formats),
+        "formats": {},
     }
+
+    # Precompute extractor availability / reasons for each format.
+    for fmt in formats:
+        fmt_specs = specs_by_format[fmt]
+        ext_meta: Dict[str, Dict] = {}
+        for spec in fmt_specs:
+            if spec.available():
+                ext_meta[spec.name] = {"status": "available"}
+            else:
+                ext_meta[spec.name] = {
+                    "status": "unavailable",
+                    "reason": spec.unavail_reason(),
+                }
+        manifest["formats"][fmt] = {
+            "extractors": ext_meta,
+            "pdfs": {},
+        }
+        unavailable = [
+            f"{n}.{fmt} ({m['reason']})"
+            for n, m in ext_meta.items()
+            if m["status"] == "unavailable"
+        ]
+        if unavailable:
+            print(f"[warn] unavailable for {fmt}: {', '.join(unavailable)}", file=sys.stderr)
 
     total = len(corpus)
     for idx, (bucket, pdf) in enumerate(corpus, start=1):
         rel_key = _relative_key(pdf)
         print(f"[{idx:>3}/{total}] {bucket:<16} {pdf}", flush=True)
-        pdf_entry = {
-            "bucket": bucket,
-            "pdf": str(pdf),
-            "rel": rel_key,
-            "exists": pdf.exists(),
-            "size": pdf.stat().st_size if pdf.exists() else 0,
-            "results": {},
-        }
-        if not pdf.exists():
-            pdf_entry["error"] = "pdf missing"
-            manifest["pdfs"].append(pdf_entry)
-            continue
 
-        for ext in available:
-            out_path = out_dir / ext.name / (rel_key + ".txt")
-            out_path.parent.mkdir(parents=True, exist_ok=True)
+        exists = pdf.exists()
+        size = pdf.stat().st_size if exists else 0
 
-            if out_path.exists() and not force:
-                try:
-                    text = out_path.read_text(encoding="utf-8", errors="replace")
-                except Exception as e:
-                    text = ""
-                    err = f"reread error: {e}"
-                else:
-                    err = None
-                res = ExtractionResult(
-                    extractor=ext.name,
-                    pdf=pdf,
-                    out_path=out_path,
-                    ok=err is None,
-                    returncode=0,
-                    elapsed=0.0,
-                    bytes=len(text.encode("utf-8")),
-                    lines=_count_lines(text),
-                    error=err,
+        for fmt in formats:
+            fmt_specs = specs_by_format[fmt]
+            pdf_results: Dict[str, Dict] = {
+                "bucket": bucket,
+                "pdf": str(pdf),
+                "rel": rel_key,
+                "exists": exists,
+                "size": size,
+                "results": {},
+            }
+            if not exists:
+                pdf_results["error"] = "pdf missing"
+                manifest["formats"][fmt]["pdfs"][str(pdf)] = pdf_results
+                continue
+
+            for spec in fmt_specs:
+                ext_meta = manifest["formats"][fmt]["extractors"][spec.name]
+                out_path = (
+                    out_dir / f"{spec.name}.{spec.format}" / (rel_key + spec.file_ext)
                 )
-            else:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                if ext_meta["status"] == "unavailable":
+                    pdf_results["results"][spec.name] = {
+                        "status": "unavailable",
+                        "reason": ext_meta["reason"],
+                        "ok": False,
+                        "bytes": 0,
+                        "lines": 0,
+                        "elapsed": 0.0,
+                        "out_path": str(out_path),
+                    }
+                    continue
+
+                if out_path.exists() and not force:
+                    try:
+                        text = out_path.read_text(encoding="utf-8", errors="replace")
+                        err = None
+                    except Exception as e:
+                        text = ""
+                        err = f"reread error: {e}"
+                    status = "ok" if err is None else "error"
+                    pdf_results["results"][spec.name] = {
+                        "status": status,
+                        "ok": err is None,
+                        "returncode": 0,
+                        "elapsed": 0.0,
+                        "bytes": len(text.encode("utf-8")),
+                        "lines": _count_lines(text),
+                        "out_path": str(out_path),
+                        "error": err,
+                        "cached": True,
+                        "diagnostics": _diagnostics(text),
+                    }
+                    continue
+
                 t0 = time.time()
-                if ext.kind == "rust":
-                    ok, rc, text, err = _run_rust(ext, pdf)
-                elif ext.kind == "pdftotext":
-                    ok, rc, text, err = _run_pdftotext(pdf, pages)
-                elif ext.kind == "pypdfium2":
-                    ok, rc, text, err = _run_pypdfium2(pdf, pages)
-                else:  # pragma: no cover
-                    ok, rc, text, err = False, None, "", f"unknown kind {ext.kind}"
+                ok, rc, text, err = spec.runner(pdf, pages)
                 elapsed = time.time() - t0
                 try:
                     out_path.write_text(text or "", encoding="utf-8")
@@ -496,34 +744,36 @@ def run_all(
                         err = f"write error: {e}"
                     else:
                         err = f"{err}; write error: {e}"
-                res = ExtractionResult(
-                    extractor=ext.name,
-                    pdf=pdf,
-                    out_path=out_path,
-                    ok=ok,
-                    returncode=rc,
-                    elapsed=elapsed,
-                    bytes=len((text or "").encode("utf-8")),
-                    lines=_count_lines(text or ""),
-                    error=err,
-                )
+                status = "ok" if ok and err is None else "error"
+                if err == "timeout":
+                    status = "timeout"
+                pdf_results["results"][spec.name] = {
+                    "status": status,
+                    "ok": ok and err is None,
+                    "returncode": rc,
+                    "elapsed": round(elapsed, 3),
+                    "bytes": len((text or "").encode("utf-8")),
+                    "lines": _count_lines(text or ""),
+                    "out_path": str(out_path),
+                    "error": err,
+                    "cached": False,
+                    "diagnostics": _diagnostics(text or ""),
+                }
 
-            pdf_entry["results"][ext.name] = {
-                "ok": res.ok,
-                "returncode": res.returncode,
-                "elapsed": round(res.elapsed, 3),
-                "bytes": res.bytes,
-                "lines": res.lines,
-                "out_path": str(res.out_path),
-                "error": res.error,
-                "diagnostics": _diagnostics(
-                    res.out_path.read_text(encoding="utf-8", errors="replace")
-                    if res.out_path.exists()
-                    else ""
-                ),
-            }
+            manifest["formats"][fmt]["pdfs"][str(pdf)] = pdf_results
 
-        manifest["pdfs"].append(pdf_entry)
+    # Backwards-compat: if only text was requested, expose the old
+    # top-level shape so downstream tooling that parses manifest.json
+    # still keeps working.
+    if list(formats) == ["text"]:
+        text_fmt = manifest["formats"]["text"]
+        manifest["extractors"] = [
+            n for n, m in text_fmt["extractors"].items() if m["status"] == "available"
+        ]
+        manifest["missing_extractors"] = [
+            n for n, m in text_fmt["extractors"].items() if m["status"] != "available"
+        ]
+        manifest["pdfs"] = list(text_fmt["pdfs"].values())
 
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -559,11 +809,10 @@ def _jaccard(a: set, b: set) -> float:
     return inter / union if union else 0.0
 
 
-def _read_output(manifest: Dict, pdf_entry: Dict, extractor: str) -> str:
-    res = pdf_entry.get("results", {}).get(extractor)
+def _read_result_text(res: Optional[Dict]) -> str:
     if not res:
         return ""
-    path = Path(res["out_path"])
+    path = Path(res.get("out_path", ""))
     if not path.exists():
         return ""
     try:
@@ -572,9 +821,44 @@ def _read_output(manifest: Dict, pdf_entry: Dict, extractor: str) -> str:
         return ""
 
 
+def _format_section(manifest: Dict, fmt: str) -> Optional[Dict]:
+    """Return the per-format section of the manifest for ``fmt``.
+
+    Handles both the new per-format layout and the legacy flat layout
+    (which is implicitly the "text" format).
+    """
+    formats = manifest.get("formats")
+    if isinstance(formats, dict) and fmt in formats:
+        return formats[fmt]
+    if fmt == "text" and "pdfs" in manifest:
+        legacy_pdfs = manifest.get("pdfs", [])
+        pdfs_map: Dict[str, Dict] = {}
+        for entry in legacy_pdfs:
+            pdfs_map[entry["pdf"]] = entry
+        return {
+            "extractors": {n: {"status": "available"} for n in manifest.get("extractors", [])},
+            "pdfs": pdfs_map,
+        }
+    return None
+
+
+def _iter_pdf_entries(section: Dict) -> List[Dict]:
+    pdfs = section.get("pdfs", {})
+    if isinstance(pdfs, dict):
+        return list(pdfs.values())
+    if isinstance(pdfs, list):
+        return list(pdfs)
+    return []
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     run_dir = Path(args.run)
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    fmt = args.format
+    section = _format_section(manifest, fmt)
+    if section is None:
+        print(f"No section for format {fmt!r} in {run_dir}/manifest.json", file=sys.stderr)
+        return 2
     base = args.baseline
     head = args.head
     rows: List[Tuple[float, Dict]] = []
@@ -583,12 +867,23 @@ def cmd_diff(args: argparse.Namespace) -> int:
     errors = 0
     flagged: List[Dict] = []
 
-    for entry in manifest["pdfs"]:
+    base_avail = section.get("extractors", {}).get(base, {}).get("status") == "available"
+    head_avail = section.get("extractors", {}).get(head, {}).get("status") == "available"
+    if not base_avail:
+        reason = section.get("extractors", {}).get(base, {}).get("reason", "?")
+        print(f"[warn] baseline {base}.{fmt} unavailable: {reason}", file=sys.stderr)
+    if not head_avail:
+        reason = section.get("extractors", {}).get(head, {}).get("reason", "?")
+        print(f"[warn] head {head}.{fmt} unavailable: {reason}", file=sys.stderr)
+
+    for entry in _iter_pdf_entries(section):
         res = entry.get("results", {})
         if base not in res or head not in res:
             continue
-        base_text = _read_output(manifest, entry, base)
-        head_text = _read_output(manifest, entry, head)
+        if res[base].get("status") == "unavailable" or res[head].get("status") == "unavailable":
+            continue
+        base_text = _read_result_text(res[base])
+        head_text = _read_result_text(res[head])
         base_tokens = _tokenize(base_text)
         head_tokens = _tokenize(head_text)
         base_set = set(base_tokens)
@@ -620,7 +915,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
     rows.sort(key=lambda r: r[0])
 
-    print(f"Regression diff: {head} vs {base}")
+    print(f"Regression diff [{fmt}]: {head} vs {base}")
     print(f"Run dir:   {run_dir}")
     print(f"PDFs:      {len(rows)}")
     print(f"Errors:    {errors}")
@@ -651,16 +946,23 @@ def cmd_diff(args: argparse.Namespace) -> int:
 def cmd_groundtruth(args: argparse.Namespace) -> int:
     run_dir = Path(args.run)
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    fmt = args.format
+    section = _format_section(manifest, fmt)
+    if section is None:
+        print(f"No section for format {fmt!r} in {run_dir}/manifest.json", file=sys.stderr)
+        return 2
     ref = args.ref
     actual = args.actual
 
     rows: List[Tuple[float, Dict]] = []
-    for entry in manifest["pdfs"]:
+    for entry in _iter_pdf_entries(section):
         res = entry.get("results", {})
         if ref not in res or actual not in res:
             continue
-        ref_text = _read_output(manifest, entry, ref)
-        act_text = _read_output(manifest, entry, actual)
+        if res[ref].get("status") == "unavailable" or res[actual].get("status") == "unavailable":
+            continue
+        ref_text = _read_result_text(res[ref])
+        act_text = _read_result_text(res[actual])
         ref_tokens = set(_tokenize(ref_text))
         act_tokens = set(_tokenize(act_text))
         j = _jaccard(ref_tokens, act_tokens)
@@ -682,7 +984,7 @@ def cmd_groundtruth(args: argparse.Namespace) -> int:
         )
     rows.sort(key=lambda r: r[0])
 
-    print(f"Groundtruth: {actual} vs ref={ref}")
+    print(f"Groundtruth [{fmt}]: {actual} vs ref={ref}")
     print(f"Run dir:   {run_dir}")
     print(f"PDFs:      {len(rows)}")
     print()
@@ -707,29 +1009,36 @@ def cmd_groundtruth(args: argparse.Namespace) -> int:
 def cmd_show(args: argparse.Namespace) -> int:
     run_dir = Path(args.run)
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    fmt = args.format
+    section = _format_section(manifest, fmt)
+    if section is None:
+        print(f"No section for format {fmt!r} in {run_dir}/manifest.json", file=sys.stderr)
+        return 2
     target = args.pdf
     hit: Optional[Dict] = None
-    for entry in manifest["pdfs"]:
+    for entry in _iter_pdf_entries(section):
         if entry["pdf"] == target or Path(entry["pdf"]).name == target:
             hit = entry
             break
     if hit is None:
-        print(f"No entry matching {target!r} in {run_dir}/manifest.json", file=sys.stderr)
+        print(f"No entry matching {target!r} in {run_dir}/manifest.json (format {fmt})", file=sys.stderr)
         return 1
 
-    extractors = manifest.get("extractors", ["v0323", "head", "pdftotext", "pypdfium2"])
-    print(f"PDF: {hit['pdf']}")
+    extractors = list(section.get("extractors", {}).keys()) or ["v0323", "head", "pdftotext", "pypdfium2"]
+    print(f"PDF:    {hit['pdf']}")
     print(f"Bucket: {hit.get('bucket', '?')}")
     print(f"Size:   {hit.get('size', 0)} bytes")
+    print(f"Format: {fmt}")
     print()
     for ext in extractors:
         res = hit.get("results", {}).get(ext)
         if res is None:
             continue
-        text = _read_output(manifest, hit, ext)
+        text = _read_result_text(res)
         header = (
-            f"===== {ext} | ok={res['ok']} bytes={res['bytes']} lines={res['lines']} "
-            f"elapsed={res['elapsed']}s ====="
+            f"===== {ext}.{fmt} | status={res.get('status','?')} "
+            f"ok={res.get('ok')} bytes={res.get('bytes')} lines={res.get('lines')} "
+            f"elapsed={res.get('elapsed')}s ====="
         )
         print(header)
         if res.get("error"):
@@ -755,6 +1064,21 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_formats(raw: str) -> List[str]:
+    out: List[str] = []
+    for tok in raw.split(","):
+        tok = tok.strip().lower()
+        if not tok:
+            continue
+        if tok not in FORMATS:
+            raise argparse.ArgumentTypeError(f"unknown format {tok!r}; choose from {FORMATS}")
+        if tok not in out:
+            out.append(tok)
+    if not out:
+        raise argparse.ArgumentTypeError("no formats specified")
+    return out
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     corpus_file = Path(args.corpus)
     if not corpus_file.exists():
@@ -766,7 +1090,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         out_dir = RUNS_ROOT_DEFAULT / stamp
     else:
         out_dir = Path(args.out)
-    run_all(corpus, out_dir, pages=args.pages, force=args.force)
+    formats = _parse_formats(args.formats)
+    run_all(corpus, out_dir, pages=args.pages, force=args.force, formats=formats)
     return 0
 
 
@@ -778,33 +1103,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_collect.add_argument("--output", default=str(CORPUS_FILE_DEFAULT))
     p_collect.set_defaults(func=cmd_collect)
 
-    p_run = sub.add_parser("run", help="Run all extractors on the corpus")
+    p_run = sub.add_parser("run", help="Run every (extractor, format) combo on the corpus")
     p_run.add_argument("--corpus", default=str(CORPUS_FILE_DEFAULT))
     p_run.add_argument("--out", default=None)
     p_run.add_argument(
         "--pages",
         type=int,
         default=3,
-        help="Pages per PDF for pdftotext/pypdfium2 (rust extractors always dump the whole doc). -1 for all.",
+        help="Pages per PDF for pdftotext/pypdfium2/pymupdf4llm (rust extractors always dump the whole doc). -1 for all.",
     )
     p_run.add_argument("--force", action="store_true", help="Re-run extractors even if output files exist")
+    p_run.add_argument(
+        "--formats",
+        default=",".join(FORMATS),
+        help="Comma-separated subset of {text,markdown,html}",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_diff = sub.add_parser("diff", help="Compare head vs baseline from a run directory")
     p_diff.add_argument("--run", required=True)
     p_diff.add_argument("--baseline", default="v0323")
     p_diff.add_argument("--head", default="head")
+    p_diff.add_argument("--format", default="text", choices=list(FORMATS))
     p_diff.set_defaults(func=cmd_diff)
 
     p_gt = sub.add_parser("groundtruth", help="Compare an extractor against a reference (default pdftotext)")
     p_gt.add_argument("--run", required=True)
     p_gt.add_argument("--ref", default="pdftotext")
     p_gt.add_argument("--actual", default="head")
+    p_gt.add_argument("--format", default="text", choices=list(FORMATS))
     p_gt.set_defaults(func=cmd_groundtruth)
 
-    p_show = sub.add_parser("show", help="Print all extractors' output for a single PDF")
+    p_show = sub.add_parser("show", help="Print extractors' output for a single PDF")
     p_show.add_argument("--run", required=True)
     p_show.add_argument("--pdf", required=True, help="Full PDF path or bare filename")
+    p_show.add_argument("--format", default="text", choices=list(FORMATS))
     p_show.set_defaults(func=cmd_show)
 
     return parser
