@@ -663,7 +663,7 @@ pub fn extract_image_from_xobject(
                 width,
                 height,
                 bits_per_component,
-            );
+            )?;
             ImageData::Raw {
                 pixels: expanded,
                 format: PixelFormat::RGB,
@@ -781,6 +781,14 @@ fn resolve_indexed_palette(
 ///
 /// Supports 1, 2, 4, and 8 bit-per-component index streams. Rows are padded
 /// to byte boundaries per the PDF spec.
+///
+/// Returns `Err(Error::Image)` when the requested dimensions would require
+/// more than `MAX_INDEXED_OUTPUT_BYTES` to decode, or when the `usize`
+/// arithmetic on `width * height * channels` / `width * bpc` overflows,
+/// or when the input `raw` buffer is too short to supply every row of the
+/// requested height. This is an input-amplification guard for maliciously
+/// crafted PDFs that pair tiny streams with extreme Indexed image
+/// dimensions — see issue #324.
 fn expand_indexed_to_rgb(
     raw: &[u8],
     palette: &[u8],
@@ -788,13 +796,64 @@ fn expand_indexed_to_rgb(
     width: u32,
     height: u32,
     bpc: u8,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
+    /// Hard cap on the decoded output buffer size (256 MiB). Legitimate
+    /// Indexed images in real PDFs are several orders of magnitude below
+    /// this — the cap only fires on pathological / adversarial inputs
+    /// where `width * height` is billions of pixels.
+    const MAX_INDEXED_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+
     let w = width as usize;
     let h = height as usize;
     let n = base_fmt.bytes_per_pixel();
     let bpc = bpc.max(1);
-    let bytes_per_row = (w * bpc as usize).div_ceil(8);
-    let mut out = Vec::with_capacity(w * h * 3);
+
+    // Checked arithmetic for `bytes_per_row = ceil(w * bpc / 8)`.
+    let bytes_per_row = w
+        .checked_mul(bpc as usize)
+        .map(|v| v.div_ceil(8))
+        .ok_or_else(|| {
+            Error::Image(format!("Indexed image row width overflow: {w} × {bpc} bpc exceeds usize"))
+        })?;
+
+    // Checked arithmetic for `w * h * 3` (output always written as RGB).
+    let output_bytes = w
+        .checked_mul(h)
+        .and_then(|v| v.checked_mul(3))
+        .ok_or_else(|| {
+            Error::Image(format!("Indexed image output size overflow: {w} × {h} × 3 exceeds usize"))
+        })?;
+
+    if output_bytes > MAX_INDEXED_OUTPUT_BYTES {
+        return Err(Error::Image(format!(
+            "Indexed image decode would produce {output_bytes} bytes, \
+             exceeds guard limit of {MAX_INDEXED_OUTPUT_BYTES} bytes \
+             (width={w}, height={h})"
+        )));
+    }
+
+    // The decoded index stream must cover every row of the image.
+    // Truncated streams used to get silently zero-padded, which lets a
+    // malicious PDF pair a 10-byte stream with a 10 000 × 10 000 image
+    // and force a ~300 MiB allocation filled with default palette entry
+    // 0. Reject that shape up front.
+    let required_bytes = bytes_per_row.checked_mul(h).ok_or_else(|| {
+        Error::Image(format!(
+            "Indexed image required-input size overflow: {bytes_per_row} × {h} exceeds usize"
+        ))
+    })?;
+    if raw.len() < required_bytes {
+        return Err(Error::Image(format!(
+            "Indexed image index stream truncated: {} bytes available, \
+             {} required ({} bytes/row × {} rows)",
+            raw.len(),
+            required_bytes,
+            bytes_per_row,
+            h
+        )));
+    }
+
+    let mut out = Vec::with_capacity(output_bytes);
 
     let read_index = |row: &[u8], x: usize| -> usize {
         match bpc {
@@ -861,7 +920,7 @@ fn expand_indexed_to_rgb(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Convert a single CMYK pixel to RGB.
@@ -1007,7 +1066,7 @@ mod indexed_tests {
             0, 0, 255, // index 3 blue
         ];
         let raw = vec![0, 1, 2, 3];
-        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 2, 2, 8);
+        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 2, 2, 8).unwrap();
         assert_eq!(out, vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
     }
 
@@ -1016,7 +1075,7 @@ mod indexed_tests {
         // Base color space is Grayscale, palette is 1 byte per entry
         let palette = vec![10, 128, 255];
         let raw = vec![0, 1, 2];
-        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::Grayscale, 3, 1, 8);
+        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::Grayscale, 3, 1, 8).unwrap();
         assert_eq!(out, vec![10, 10, 10, 128, 128, 128, 255, 255, 255]);
     }
 
@@ -1025,7 +1084,7 @@ mod indexed_tests {
         // Palette only has 2 entries but raw has index 5 → zeroed
         let palette = vec![10, 20, 30, 40, 50, 60];
         let raw = vec![0, 5];
-        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 2, 1, 8);
+        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 2, 1, 8).unwrap();
         assert_eq!(out, vec![10, 20, 30, 0, 0, 0]);
     }
 
@@ -1052,7 +1111,7 @@ mod indexed_tests {
 
         // Index 2 (> hival) must now be treated as out-of-range → black pixel.
         let raw = vec![0, 1, 2];
-        let out = expand_indexed_to_rgb(&raw, &palette, fmt, 3, 1, 8);
+        let out = expand_indexed_to_rgb(&raw, &palette, fmt, 3, 1, 8).unwrap();
         assert_eq!(out, vec![10, 20, 30, 40, 50, 60, 0, 0, 0]);
     }
 
@@ -1061,7 +1120,7 @@ mod indexed_tests {
         // Palette has a single CMYK entry; expansion must match the shared helper.
         let palette = vec![64, 128, 192, 32];
         let raw = vec![0];
-        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::CMYK, 1, 1, 8);
+        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::CMYK, 1, 1, 8).unwrap();
         let expected = cmyk_pixel_to_rgb(64, 128, 192, 32);
         assert_eq!(out, expected.to_vec());
     }
@@ -1073,7 +1132,7 @@ mod indexed_tests {
         // Row 1 indices: 1,1,0,0,1 → top nibble 11001xxx = 0xC8
         let palette = vec![10, 20, 30, 200, 210, 220];
         let raw = vec![0x50, 0xC8];
-        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 5, 2, 1);
+        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 5, 2, 1).unwrap();
         assert_eq!(
             out,
             vec![
@@ -1094,7 +1153,7 @@ mod indexed_tests {
             70, 80, 90, // 3
         ];
         let raw = vec![0x18];
-        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 3, 1, 2);
+        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 3, 1, 2).unwrap();
         assert_eq!(out, vec![0, 0, 0, 10, 20, 30, 40, 50, 60]);
     }
 
@@ -1109,7 +1168,47 @@ mod indexed_tests {
         ];
         // indices: 0,1,2,3 → packed: 0x01, 0x23
         let raw = vec![0x01, 0x23];
-        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 4, 1, 4);
+        let out = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 4, 1, 4).unwrap();
         assert_eq!(out, vec![0, 0, 0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
+    }
+
+    // ---- DoS / hardening guards for #324 ----
+
+    #[test]
+    fn expand_indexed_rejects_overflow_dimensions() {
+        // Dimensions that overflow usize when computing w * h * 3. Previously
+        // Vec::with_capacity(w*h*3) would panic or reserve absurd amounts.
+        let palette = vec![0, 0, 0, 255, 0, 0];
+        let raw = vec![0, 1];
+        let huge = u32::MAX / 2;
+        let result = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, huge, huge, 8);
+        assert!(result.is_err(), "overflow dimensions must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("overflow") || err.contains("exceeds"),
+            "expected overflow/limit error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_indexed_rejects_truncated_stream() {
+        // 10x10 8bpc image requires 100 index bytes. Supplying 10 used to
+        // silently zero-pad the remaining rows; now it's an error.
+        let palette = vec![10, 20, 30, 40, 50, 60];
+        let raw = vec![0; 10];
+        let result = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 10, 10, 8);
+        assert!(result.is_err(), "truncated stream must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("truncated"), "expected truncated error, got: {err}");
+    }
+
+    #[test]
+    fn expand_indexed_rejects_output_over_cap() {
+        // 12 000 × 12 000 × 3 = 432 MB > 256 MB guard. Stream is honestly
+        // sized for 12 000 × 12 000 but should still fail the size guard.
+        let palette = vec![0, 0, 0];
+        let raw = vec![0; 12_000 * 12_000];
+        let result = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 12_000, 12_000, 8);
+        assert!(result.is_err(), "oversized output must be rejected");
     }
 }
