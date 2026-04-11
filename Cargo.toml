@@ -4,7 +4,7 @@ exclude = ["js"]
 
 [package]
 name = "pdf_oxide"
-version = "0.3.24"
+version = "0.3.25"
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -18,7 +18,11 @@ categories = ["parsing", "text-processing"]
 
 [lib]
 name = "pdf_oxide"
-crate-type = ["cdylib", "rlib"]  # cdylib for Python/WASM, rlib for Rust
+# cdylib: Python (maturin), WASM, C# (P/Invoke), Node.js (N-API dynamic link)
+# rlib: native Rust consumers
+# staticlib: Go CGo (#334) and Node.js (#335) — produces libpdf_oxide.a for
+# self-contained binaries with no runtime LD_LIBRARY_PATH/PATH lookups
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 # Core dependencies

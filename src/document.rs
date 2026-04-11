@@ -155,6 +155,12 @@ pub struct PdfDocument {
     /// Encryption handler (if PDF is encrypted).
     /// Wrapped in RefCell for interior mutability (lazy initialization from &self).
     encryption_handler: Mutex<Option<EncryptionHandler>>,
+    /// ObjectRef of the /Encrypt dictionary, cached so its strings are
+    /// skipped during per-object string decryption. The entries in the
+    /// encryption dict (/O, /U, /OE, /UE, /Perms, …) are key material used
+    /// to derive the encryption key, not ciphertext, and must never be
+    /// passed through `decrypt_string`.
+    encrypt_dict_ref: Mutex<Option<ObjectRef>>,
     /// Parser configuration options for error handling and recovery
     #[allow(dead_code)]
     options: ParserOptions,
@@ -432,6 +438,7 @@ impl PdfDocument {
             resolving_stack: Mutex::new(HashSet::new()),
             recursion_depth: Mutex::new(0),
             encryption_handler: Mutex::new(None),
+            encrypt_dict_ref: Mutex::new(None),
             options: ParserOptions::default(),
             header_offset,
             font_cache: Mutex::new(HashMap::new()),
@@ -556,6 +563,9 @@ impl PdfDocument {
             Object::Dictionary(_) => encrypt_ref,
             Object::Reference(obj_ref) => {
                 log::debug!("Loading /Encrypt object reference {} {}", obj_ref.id, obj_ref.gen);
+                // Remember which object holds the /Encrypt dict so its own
+                // strings are skipped during per-object string decryption.
+                *self.encrypt_dict_ref.lock().unwrap() = Some(obj_ref);
                 self.load_object(obj_ref)?
             },
             _ => {
@@ -693,10 +703,45 @@ impl PdfDocument {
     /// or `Ok(true)` if the PDF is not encrypted (no authentication needed).
     pub fn authenticate(&self, password: &[u8]) -> Result<bool> {
         self.ensure_encryption_initialized()?;
-        match self.encryption_handler.lock().unwrap().as_mut() {
+        // Capture current authentication state *before* calling the
+        // handler so we can detect the transition from "not authenticated"
+        // to "authenticated" and invalidate the object cache accordingly.
+        // Any objects loaded and cached before successful authentication
+        // still hold ciphertext strings (see `load_uncompressed_object_impl`
+        // at the `handler.is_authenticated()` guard), so a cache hit after
+        // authentication would return those stale values forever — issue
+        // #323.
+        let was_authenticated = self
+            .encryption_handler
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.is_authenticated())
+            .unwrap_or(true);
+
+        let result = match self.encryption_handler.lock().unwrap().as_mut() {
             Some(handler) => handler.authenticate(password),
-            None => Ok(true), // Not encrypted, always "authenticated"
+            None => return Ok(true), // Not encrypted, always "authenticated"
+        };
+
+        if let Ok(true) = result {
+            if !was_authenticated {
+                // Transitioned from "encrypted, not authenticated" to
+                // "authenticated". Drop every cached object so subsequent
+                // `load_object` calls re-parse through the path that now
+                // runs `decrypt_strings_in_object` on the uncompressed
+                // string values. The `/Encrypt` dictionary is not in this
+                // cache path (it is resolved independently), so clearing
+                // is always safe.
+                self.object_cache.lock().unwrap().clear();
+                log::debug!(
+                    "authenticate(): object cache cleared after successful authentication \
+                     to force re-decryption of any pre-auth cached objects (#323)"
+                );
+            }
         }
+
+        result
     }
 
     /// Check if the PDF is encrypted.
@@ -1278,6 +1323,413 @@ impl PdfDocument {
         self.load_uncompressed_object_impl(obj_ref, offset, false)
     }
 
+    /// Promote labels in rowspan-sparse columns so they sort at the top
+    /// of their data-row block instead of landing mid-group.
+    ///
+    /// A "label" here is a span in an X-cluster that contains far fewer
+    /// spans than the most populous X-cluster (i.e., it spans multiple
+    /// rows of the adjacent data column). Labels are typically vertically
+    /// centred in their block, so a strict Y sort places them between
+    /// the rows they describe. This post-processor detects the pattern
+    /// and rewrites each label's effective sort Y to sit just above the
+    /// topmost data row it visually covers.
+    ///
+    /// Data rows are partitioned between adjacent labels at the midpoint
+    /// of their Y coordinates (nearest-label assignment). The topmost
+    /// data row in a label's partition becomes the anchor for promotion.
+    ///
+    /// Nothing is mutated if there are no sparse columns or not enough
+    /// data rows to confidently infer row-grouping (min 6 rows in the
+    /// dense reference column).
+    /// Identify span indices that look like multi-row-spanning labels —
+    /// sparse-X-column spans whose Y values sit inside the data Y range
+    /// of the dense columns on the page. These are the same spans that
+    /// `reorder_rowspan_labels` would promote to the top of their row
+    /// block, except this function returns them **before** the spatial
+    /// table detector's retain filter has a chance to drop them from
+    /// the flow span list.
+    ///
+    /// The retain filter in `extract_text_with_options` removes every
+    /// span whose bbox is contained in a detected table's bbox. On CJK
+    /// reference-data PDFs (issue #329) the test-name label column is
+    /// narrow and vertically centred within each multi-row data block,
+    /// so its spans are inside the table bbox and would be dropped
+    /// without replacement — the spatial table extractor does not emit
+    /// these labels as `TableCell`s either. Preserving the identified
+    /// labels through the retain filter lets `reorder_rowspan_labels`
+    /// promote them to their proper reading-order position alongside
+    /// the surviving flow spans.
+    ///
+    /// Returns a `HashSet` of indices into the provided `spans` slice.
+    /// Callers must use the returned indices **before** any reordering
+    /// or retention mutates the slice.
+    pub(crate) fn identify_multi_row_labels(
+        spans: &[crate::layout::TextSpan],
+    ) -> std::collections::HashSet<usize> {
+        use std::collections::{BTreeSet, HashMap as StdHashMap, HashSet};
+
+        let mut out: HashSet<usize> = HashSet::new();
+        if spans.len() < 10 {
+            return out;
+        }
+
+        // Cluster by X proximity (15pt gap threshold) — same heuristic
+        // as `reorder_rowspan_labels`.
+        let mut by_x: Vec<usize> = (0..spans.len()).collect();
+        by_x.sort_by(|&a, &b| crate::utils::safe_float_cmp(spans[a].bbox.x, spans[b].bbox.x));
+        const X_GAP: f32 = 15.0;
+        let mut columns: Vec<Vec<usize>> = Vec::new();
+        let mut cur: Vec<usize> = Vec::new();
+        let mut last_x = f32::NEG_INFINITY;
+        for &idx in &by_x {
+            let x = spans[idx].bbox.x;
+            if !cur.is_empty() && x - last_x > X_GAP {
+                columns.push(std::mem::take(&mut cur));
+            }
+            cur.push(idx);
+            last_x = x;
+        }
+        if !cur.is_empty() {
+            columns.push(cur);
+        }
+        if columns.len() < 2 {
+            return out;
+        }
+
+        let max_count = columns.iter().map(|c| c.len()).max().unwrap_or(0);
+        if max_count < 6 {
+            return out;
+        }
+
+        // Sort columns by span count descending to pick the dense clusters.
+        let mut col_order: Vec<usize> = (0..columns.len()).collect();
+        col_order.sort_by(|&a, &b| columns[b].len().cmp(&columns[a].len()));
+        let dense_cols_count = columns.iter().filter(|c| c.len() * 2 > max_count).count();
+
+        let band_of = |y: f32| (y / crate::utils::ROW_BAND_TOLERANCE_PT).round() as i32;
+        let data_bands: BTreeSet<i32> = if dense_cols_count >= 3 {
+            let top: Vec<&Vec<usize>> = col_order.iter().take(3).map(|&i| &columns[i]).collect();
+            let mut support: StdHashMap<i32, usize> = StdHashMap::new();
+            for col in &top {
+                let bands: HashSet<i32> = col.iter().map(|&i| band_of(spans[i].bbox.y)).collect();
+                for b in bands {
+                    *support.entry(b).or_insert(0) += 1;
+                }
+            }
+            support
+                .into_iter()
+                .filter(|(_, c)| *c >= 3)
+                .map(|(b, _)| b)
+                .collect()
+        } else if dense_cols_count == 2 {
+            let a: HashSet<i32> = columns[col_order[0]]
+                .iter()
+                .map(|&i| band_of(spans[i].bbox.y))
+                .collect();
+            let b: HashSet<i32> = columns[col_order[1]]
+                .iter()
+                .map(|&i| band_of(spans[i].bbox.y))
+                .collect();
+            a.intersection(&b).copied().collect()
+        } else {
+            columns[col_order[0]]
+                .iter()
+                .map(|&i| band_of(spans[i].bbox.y))
+                .collect()
+        };
+
+        if data_bands.len() < 4 {
+            return out;
+        }
+
+        let band_pt = crate::utils::ROW_BAND_TOLERANCE_PT;
+        let data_top = (*data_bands.iter().next_back().unwrap() as f32) * band_pt + band_pt / 2.0;
+        let data_bot = (*data_bands.iter().next().unwrap() as f32) * band_pt - band_pt / 2.0;
+
+        // Collect sparse-column spans that sit inside the data Y range
+        // and belong to a column with >= 2 members in that range.
+        for col in &columns {
+            if col.len() < 2 || col.len() * 2 >= max_count {
+                continue;
+            }
+            let in_data: Vec<usize> = col
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let y = spans[i].bbox.y;
+                    y > data_bot && y < data_top
+                })
+                .collect();
+            if in_data.len() >= 2 {
+                out.extend(in_data);
+            }
+        }
+
+        out
+    }
+
+    pub(crate) fn reorder_rowspan_labels(spans: &mut Vec<crate::layout::TextSpan>) {
+        use std::collections::HashMap;
+
+        if spans.len() < 10 {
+            return;
+        }
+
+        // Cluster by X proximity (15pt gap threshold). Walk spans ordered
+        // by left edge; start a new cluster whenever the gap exceeds the
+        // threshold.
+        let mut by_x: Vec<usize> = (0..spans.len()).collect();
+        by_x.sort_by(|&a, &b| crate::utils::safe_float_cmp(spans[a].bbox.x, spans[b].bbox.x));
+        const X_GAP: f32 = 15.0;
+        let mut columns: Vec<Vec<usize>> = Vec::new();
+        let mut cur: Vec<usize> = Vec::new();
+        let mut last_x = f32::NEG_INFINITY;
+        for &idx in &by_x {
+            let x = spans[idx].bbox.x;
+            if !cur.is_empty() && x - last_x > X_GAP {
+                columns.push(std::mem::take(&mut cur));
+            }
+            cur.push(idx);
+            last_x = x;
+        }
+        if !cur.is_empty() {
+            columns.push(cur);
+        }
+        if columns.len() < 2 {
+            return;
+        }
+
+        // Max column size is our reference for "dense".
+        let max_count = columns.iter().map(|c| c.len()).max().unwrap_or(0);
+        if max_count < 6 {
+            return;
+        }
+
+        // Sort columns by span count descending so we can pick the top
+        // dense cluster for anchor detection.
+        let mut col_order: Vec<usize> = (0..columns.len()).collect();
+        col_order.sort_by(|&a, &b| columns[b].len().cmp(&columns[a].len()));
+
+        // A column is "dense" when it holds a strict majority of the
+        // most populous column's spans. Pages with multiple dense data
+        // columns (three or more) let us derive the data-row range by
+        // intersecting their Y bands — headers and sub-headers populate
+        // only a subset of columns at their Y and fall out.
+        let dense_cols_count = columns.iter().filter(|c| c.len() * 2 > max_count).count();
+
+        // Most populous column, used for anchor Y lookups regardless.
+        let dense_col = &columns[col_order[0]];
+        let mut dense_ys: Vec<f32> = dense_col.iter().map(|&i| spans[i].bbox.y).collect();
+        dense_ys.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Compute the set of Y bands that count as "data". When several
+        // dense columns are available, require a band to have support in
+        // the top three; otherwise fall back to the single dense column's
+        // own Y values.
+        let band_of = |y: f32| (y / crate::utils::ROW_BAND_TOLERANCE_PT).round() as i32;
+        use std::collections::{BTreeSet, HashMap as StdHashMap, HashSet};
+
+        let data_bands: BTreeSet<i32> = if dense_cols_count >= 3 {
+            let top: Vec<&Vec<usize>> = col_order.iter().take(3).map(|&i| &columns[i]).collect();
+            let mut support: StdHashMap<i32, usize> = StdHashMap::new();
+            for col in &top {
+                let bands: HashSet<i32> = col.iter().map(|&i| band_of(spans[i].bbox.y)).collect();
+                for b in bands {
+                    *support.entry(b).or_insert(0) += 1;
+                }
+            }
+            support
+                .into_iter()
+                .filter(|(_, c)| *c >= 3)
+                .map(|(b, _)| b)
+                .collect()
+        } else if dense_cols_count == 2 {
+            let a: HashSet<i32> = columns[col_order[0]]
+                .iter()
+                .map(|&i| band_of(spans[i].bbox.y))
+                .collect();
+            let b: HashSet<i32> = columns[col_order[1]]
+                .iter()
+                .map(|&i| band_of(spans[i].bbox.y))
+                .collect();
+            a.intersection(&b).copied().collect()
+        } else {
+            dense_col
+                .iter()
+                .map(|&i| band_of(spans[i].bbox.y))
+                .collect()
+        };
+
+        if data_bands.len() < 4 {
+            return;
+        }
+        let band_pt = crate::utils::ROW_BAND_TOLERANCE_PT;
+        let data_top = (*data_bands.iter().next_back().unwrap() as f32) * band_pt + band_pt / 2.0;
+        let data_bot = (*data_bands.iter().next().unwrap() as f32) * band_pt - band_pt / 2.0;
+
+        // Collect "label" candidates: spans that sit in a "sparse"
+        // column — one that holds meaningfully fewer spans than the
+        // most populous column. A candidate only qualifies when it
+        // sits strictly inside the data Y range AND the sparse column
+        // it belongs to has at least two entries inside that range —
+        // single-span sparse cells are almost always stray annotations,
+        // not labels.
+        let mut labels: Vec<usize> = Vec::new();
+        for col in &columns {
+            if col.len() < 2 || col.len() * 2 >= max_count {
+                continue;
+            }
+            let in_data: Vec<usize> = col
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let y = spans[i].bbox.y;
+                    y > data_bot && y < data_top
+                })
+                .collect();
+            if in_data.len() >= 2 {
+                labels.extend(in_data);
+            }
+        }
+        if labels.is_empty() {
+            return;
+        }
+        labels.sort_by(|&a, &b| {
+            spans[b]
+                .bbox
+                .y
+                .partial_cmp(&spans[a].bbox.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Labels that sit at near-identical Y values almost always
+        // annotate the same logical row block (e.g. a test-name in the
+        // "name" column alongside a unit "×10⁹/L" in the "unit" column,
+        // both vertically centred in the same 6-row group). Cluster
+        // labels by Y proximity so each logical block is promoted as a
+        // unit.
+        const CLUSTER_GAP: f32 = 10.0;
+        let mut clusters: Vec<Vec<usize>> = Vec::new();
+        let mut cur: Vec<usize> = Vec::new();
+        let mut last_y = f32::NAN;
+        for &idx in &labels {
+            let y = spans[idx].bbox.y;
+            if !cur.is_empty() && (last_y - y).abs() > CLUSTER_GAP {
+                clusters.push(std::mem::take(&mut cur));
+            }
+            cur.push(idx);
+            last_y = y;
+        }
+        if !cur.is_empty() {
+            clusters.push(cur);
+        }
+        let cluster_ys: Vec<f32> = clusters
+            .iter()
+            .map(|c| c.iter().map(|&i| spans[i].bbox.y).sum::<f32>() / c.len() as f32)
+            .collect();
+
+        // For each cluster, compute the midpoint partition boundaries
+        // against its immediate neighbour clusters and find the topmost
+        // dense-column Y that falls inside the partition. Promote every
+        // member of the cluster to the same anchor so they sort together
+        // at the top of their row block.
+        let mut promoted: HashMap<usize, f32> = HashMap::new();
+        for (k, cluster) in clusters.iter().enumerate() {
+            let c_y = cluster_ys[k];
+            let upper = if k > 0 {
+                (cluster_ys[k - 1] + c_y) / 2.0
+            } else {
+                f32::INFINITY
+            };
+            let lower = if k + 1 < clusters.len() {
+                (c_y + cluster_ys[k + 1]) / 2.0
+            } else {
+                f32::NEG_INFINITY
+            };
+            let upper_clamped = upper.min(data_top);
+            let lower_clamped = lower.max(data_bot - 1.0);
+            let mut anchor = f32::NEG_INFINITY;
+            for &y in &dense_ys {
+                if y <= upper_clamped && y > lower_clamped && y > anchor {
+                    anchor = y;
+                }
+            }
+            if anchor.is_finite() {
+                for &i in cluster {
+                    promoted.insert(i, anchor + 1.0);
+                }
+            }
+        }
+        if promoted.is_empty() {
+            return;
+        }
+
+        // Re-sort spans using the promoted Ys for labels and actual Ys
+        // for everything else. Keep the row-aware comparator so the
+        // ordering stays consistent with the rest of the pipeline.
+        let mut order: Vec<usize> = (0..spans.len()).collect();
+        order.sort_by(|&a, &b| {
+            let ya = promoted.get(&a).copied().unwrap_or(spans[a].bbox.y);
+            let yb = promoted.get(&b).copied().unwrap_or(spans[b].bbox.y);
+            crate::utils::row_aware_span_cmp(ya, spans[a].bbox.x, yb, spans[b].bbox.x)
+        });
+        let reordered: Vec<crate::layout::TextSpan> =
+            order.into_iter().map(|i| spans[i].clone()).collect();
+        *spans = reordered;
+    }
+
+    /// Recursively decrypt every `Object::String` inside `obj` using the
+    /// per-object key derived from `obj_num`/`gen_num`. Streams are left
+    /// untouched — they are decrypted lazily at read time through
+    /// `decode_stream_with_encryption`. The `/Encrypt` dictionary itself
+    /// must never be passed to this function; its strings are key material,
+    /// not ciphertext.
+    ///
+    /// Per ISO 32000-1:2008 §7.6.2, strings inside encrypted-document
+    /// objects are individually encrypted with the standard encryption
+    /// algorithm. Parsed string tokens hold raw ciphertext and must be
+    /// decrypted before downstream consumers (widget text, form field
+    /// values, outlines, document info) can read them.
+    fn decrypt_strings_in_object(
+        handler: &EncryptionHandler,
+        obj: &mut Object,
+        obj_num: u32,
+        gen_num: u32,
+    ) {
+        match obj {
+            Object::String(bytes) => match handler.decrypt_string(bytes, obj_num, gen_num) {
+                Ok(decrypted) => *bytes = decrypted,
+                Err(e) => {
+                    log::debug!(
+                        "String decryption failed for object {} {}: {}",
+                        obj_num,
+                        gen_num,
+                        e
+                    );
+                },
+            },
+            Object::Array(items) => {
+                for item in items {
+                    Self::decrypt_strings_in_object(handler, item, obj_num, gen_num);
+                }
+            },
+            Object::Dictionary(dict) => {
+                for (_, value) in dict.iter_mut() {
+                    Self::decrypt_strings_in_object(handler, value, obj_num, gen_num);
+                }
+            },
+            Object::Stream { dict, .. } => {
+                // Stream *data* is decrypted separately in
+                // `decode_stream_with_encryption`. Its dict may still
+                // contain encrypted strings (e.g., /Metadata).
+                for (_, value) in dict.iter_mut() {
+                    Self::decrypt_strings_in_object(handler, value, obj_num, gen_num);
+                }
+            },
+            _ => {},
+        }
+    }
+
     /// Implementation with recursion guard to prevent infinite loops.
     fn load_uncompressed_object_impl(
         &self,
@@ -1478,13 +1930,11 @@ impl PdfDocument {
             data.len()
         );
 
-        // Phase 6B: Graceful degradation for corrupted objects
-        // Instead of failing on parse errors, return Null placeholder
-        // This allows partial content extraction from PDFs with truncated objects
-        let obj = match parse_object(&data) {
+        // Corrupted objects degrade to Null so extraction can continue on
+        // partial PDFs rather than aborting.
+        let mut obj = match parse_object(&data) {
             Ok((_, parsed_obj)) => parsed_obj,
             Err(e) => {
-                // Extract error kind without printing raw bytes
                 let error_kind = match &e {
                     nom::Err::Incomplete(_) => "Incomplete data",
                     nom::Err::Error(err) | nom::Err::Failure(err) => match err.code {
@@ -1501,11 +1951,29 @@ impl PdfDocument {
                     offset,
                     error_kind
                 );
-                // Return Null object instead of failing
-                // This allows extraction to continue with partial content
                 Object::Null
             },
         };
+
+        // Decrypt string values inside this uncompressed object before
+        // caching. Skip the /Encrypt dict (its entries are key material)
+        // and the non-authenticated case (no key derived yet). Strings
+        // inside compressed objects ride along with the ObjStm payload
+        // and are already in clear text per ISO 32000-1:2008 §7.6.2.
+        let is_encrypt_dict = *self.encrypt_dict_ref.lock().unwrap() == Some(obj_ref);
+        if !is_encrypt_dict {
+            let handler_guard = self.encryption_handler.lock().unwrap();
+            if let Some(handler) = handler_guard.as_ref() {
+                if handler.is_authenticated() {
+                    Self::decrypt_strings_in_object(
+                        handler,
+                        &mut obj,
+                        obj_ref.id,
+                        obj_ref.gen as u32,
+                    );
+                }
+            }
+        }
 
         // Cache the object
         self.object_cache
@@ -3045,10 +3513,10 @@ impl PdfDocument {
             }
         }
 
-        let text = if let Some(struct_tree) = cached_tree {
+        let text = if let Some(ref struct_tree) = cached_tree {
             // Build per-page traversal cache once, then O(1) lookup per page.
             if self.structure_content_cache.is_none() {
-                let all_content = crate::structure::traverse_structure_tree_all_pages(&struct_tree);
+                let all_content = crate::structure::traverse_structure_tree_all_pages(struct_tree);
                 self.structure_content_cache = Some(all_content);
             }
             self.extract_text_structure_order_cached_with_spans(page_index, all_spans)?
@@ -3056,27 +3524,106 @@ impl PdfDocument {
             // Untagged PDF: Use page content order
             let mut spans = all_spans;
 
-            // Exclude spans that are inside detected tables
+            // Exclude spans that are inside detected tables, BUT
+            // preserve multi-row-spanning label columns (issue #329).
+            // The spatial table extractor clusters data cells into
+            // table cells but does NOT emit the sparse label column
+            // that sits vertically centred within each multi-row data
+            // block (common on CJK lab-report reference tables like
+            // WS/T 779). Those labels would otherwise be dropped
+            // entirely from the output: the retain below would remove
+            // them because their bbox is inside the table, and
+            // `table.render_text()` would not re-emit them because the
+            // extractor never captured them as cells. Before running
+            // the retain filter we identify these rowspan labels (same
+            // heuristic `reorder_rowspan_labels` uses) and keep them in
+            // the span list so `reorder_rowspan_labels` below can
+            // promote them to the top of their row block.
             if !tables.is_empty() {
-                spans.retain(|s| {
-                    !tables
-                        .iter()
-                        .any(|t| t.bbox.is_some_and(|b| b.contains_rect(&s.bbox)))
-                });
+                // Build the set of cell text strings that every detected
+                // table will render via `table.render_text()`. Labels
+                // whose exact text already appears as a cell in some
+                // table are already covered by the inline-table flush
+                // below, so we must NOT also preserve them in the flow
+                // span list (it would produce duplicate output).
+                let mut table_cell_texts: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for t in &tables {
+                    for row in &t.rows {
+                        for cell in &row.cells {
+                            let trimmed = cell.text.trim();
+                            if !trimmed.is_empty() {
+                                table_cell_texts.insert(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+
+                let preserved_label_indices: std::collections::HashSet<usize> =
+                    Self::identify_multi_row_labels(&spans)
+                        .into_iter()
+                        .filter(|&idx| {
+                            // Only preserve labels whose text is NOT
+                            // already emitted by any table's
+                            // `render_text()`. This is what makes the
+                            // #329 fix safe on pages where the spatial
+                            // extractor captured the sparse label
+                            // column as cells — we let the table
+                            // render them and drop them from flow.
+                            // On pages like WS/T 779 where the label
+                            // column is a genuine multi-row-spanning
+                            // column that the extractor did NOT
+                            // capture, the set is empty and every
+                            // identified label stays in flow where
+                            // `reorder_rowspan_labels` below can
+                            // promote it.
+                            let t = spans[idx].text.trim();
+                            !t.is_empty() && !table_cell_texts.contains(t)
+                        })
+                        .collect();
+
+                if preserved_label_indices.is_empty() {
+                    spans.retain(|s| {
+                        !tables
+                            .iter()
+                            .any(|t| t.bbox.is_some_and(|b| b.contains_rect(&s.bbox)))
+                    });
+                } else {
+                    let kept: Vec<crate::layout::TextSpan> = spans
+                        .drain(..)
+                        .enumerate()
+                        .filter_map(|(i, s)| {
+                            let in_table = tables
+                                .iter()
+                                .any(|t| t.bbox.is_some_and(|b| b.contains_rect(&s.bbox)));
+                            if !in_table || preserved_label_indices.contains(&i) {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    spans = kept;
+                }
             }
 
-            // Sort combined spans by position: Y descending (top→bottom), then X ascending (left→right)
+            // Row-aware ordering: quantize Y into bands and sort band-
+            // descending, then X ascending within a band. Strict Y sorting
+            // would interleave cells from the same tabular row whose Y
+            // values differ by typographic jitter (common in CJK layouts,
+            // superscripts, and centered multi-line labels).
             spans.sort_by(|a, b| {
-                let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
-                if y_cmp != std::cmp::Ordering::Equal {
-                    return y_cmp;
-                }
-                let x_cmp = crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x);
-                if x_cmp != std::cmp::Ordering::Equal {
-                    return x_cmp;
+                let cmp = crate::utils::row_aware_span_cmp(a.bbox.y, a.bbox.x, b.bbox.y, b.bbox.x);
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
                 }
                 a.sequence.cmp(&b.sequence)
             });
+
+            // Promote multi-row-spanning labels (sparse-column spans
+            // vertically centred across several dense-column data rows)
+            // to sort at the top of their row block.
+            Self::reorder_rowspan_labels(&mut spans);
 
             // OCR fallback for scanned PDFs
             #[cfg(feature = "ocr")]
@@ -3101,10 +3648,75 @@ impl PdfDocument {
                     && s.font_size.is_finite()
             });
 
+            // Inline table insertion (issue #315).
+            //
+            // Tables were previously rendered in a single block appended
+            // at the end of the page text, after all flow spans. That
+            // matches how `extract_text` historically worked but it means
+            // tabular content appears far away from the prose that
+            // surrounds it in reading order — on product data sheets
+            // like ORAFOL 5900 the "Physical and Chemical Properties"
+            // label/value rows showed up 20+ lines below the section
+            // they belong to, which the reporter of #315 perceived as
+            // the content being dropped entirely.
+            //
+            // Instead, maintain a sorted queue of tables keyed by their
+            // top-Y (the larger Y coordinate of the table's bbox, per PDF
+            // user-space conventions where Y grows upward). As we walk
+            // the flow spans in row-aware reading order, whenever the
+            // next span's top-Y falls below the top-Y of the queue's
+            // leading table, we flush that table's rendered text at
+            // that point, then continue. A final pass at the end emits
+            // any tables whose top-Y is below all remaining spans (or
+            // that have no flow spans at all).
+            //
+            // Tables are emitted at most once regardless of how many
+            // spans sit above them, preserving existing behaviour
+            // semantics while inlining the rendering at its spatial
+            // reading-order position.
+            let mut pending_tables: Vec<(f32, &crate::structure::table_extractor::ExtractedTable)> =
+                tables
+                    .iter()
+                    .filter_map(|t| t.bbox.map(|b| (b.y + b.height, t)))
+                    .collect();
+            // Sort descending by top-Y so `pop()` returns the next table
+            // to emit in reading order (larger Y first).
+            pending_tables
+                .sort_by(|(a, _), (b, _)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+            let flush_table =
+                |text: &mut String, table: &crate::structure::table_extractor::ExtractedTable| {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push('\n');
+                    text.push_str(&table.render_text());
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                };
+
             let mut text = String::with_capacity(spans.len() * 20);
             let mut prev_span: Option<&TextSpan> = None;
 
             for span in &spans {
+                // Flush any tables that sit above this span in PDF
+                // reading order (their top-Y is greater than or equal
+                // to the span's top-Y, meaning they should appear first).
+                while let Some(&(table_top_y, table)) = pending_tables.last() {
+                    let span_top_y = span.bbox.y + span.bbox.height;
+                    if table_top_y >= span_top_y {
+                        flush_table(&mut text, table);
+                        pending_tables.pop();
+                        // Reset prev_span so the flow-text glue logic
+                        // doesn't try to stitch the table's rendered
+                        // block together with the next flow span.
+                        prev_span = None;
+                    } else {
+                        break;
+                    }
+                }
+
                 if let Some(prev) = prev_span {
                     let prev_end_x = prev.bbox.x + prev.bbox.width;
                     let span_end_x = span.bbox.x + span.bbox.width;
@@ -3124,6 +3736,7 @@ impl PdfDocument {
 
                     let y_diff = (prev.bbox.y - span.bbox.y).abs();
                     let gap = span.bbox.x - prev_end_x;
+                    let delta_x = span.bbox.x - prev.bbox.x;
 
                     if y_diff > 2.0 {
                         let font_size = span.font_size.max(10.0);
@@ -3143,6 +3756,28 @@ impl PdfDocument {
                             && !text.ends_with(' ')
                             && !text.ends_with('\n')
                         {
+                            text.push(' ');
+                        } else if delta_x > fs * 1.5
+                            && !text.ends_with(' ')
+                            && !text.ends_with('\n')
+                        {
+                            // Inflated-width overlap recovery (issue #328).
+                            // A negative raw gap here usually comes from a
+                            // font whose `/Widths` array is missing and
+                            // `FontInfo::new` fell back to the 550/1000-em
+                            // constant, which over-reports each glyph's
+                            // advance and drags `prev_end_x` past the real
+                            // start of the next span. When the two spans'
+                            // actual origins (`delta_x`) are separated by
+                            // more than 1.5 em, they cannot both belong to
+                            // the same word — the overlap is a width-table
+                            // artifact, not real kerning — so insert a
+                            // space to preserve the word boundary. This
+                            // rescues cases like "STATION" + "FREEDOM" and
+                            // "UTILIZATION" + "CONFERENCE" in the NASA
+                            // Apollo report header where raw gaps of
+                            // -1.75 pt and -12.75 pt sit alongside
+                            // delta_x values of 56 pt and 78 pt.
                             text.push(' ');
                         }
                     } else if Self::should_insert_space(prev, span) {
@@ -3166,6 +3801,15 @@ impl PdfDocument {
                 }
                 prev_span = Some(span);
             }
+
+            // Drain any tables that sit below all flow spans (or the
+            // page had no flow spans at all). Without this final
+            // pass they would be silently dropped now that the
+            // end-of-page `for table in tables` block has been
+            // removed.
+            while let Some((_, table)) = pending_tables.pop() {
+                flush_table(&mut text, table);
+            }
             text
         };
 
@@ -3185,8 +3829,12 @@ impl PdfDocument {
         // Apply whitespace cleanup
         let mut cleaned_text = crate::converters::whitespace::cleanup_plain_text(&final_text);
 
-        // Append ASCII tables at the end (for both tagged and untagged)
-        if !tables.is_empty() {
+        // Tagged PDFs use their own structure-tree traversal path and
+        // still need the historical end-of-page table block. Untagged
+        // PDFs now inline tables with the flow spans above, so the
+        // end-of-page dump is only run when we came through the
+        // structure-tree branch.
+        if cached_tree.is_some() && !tables.is_empty() {
             for table in tables {
                 cleaned_text.push_str("\n\n");
                 cleaned_text.push_str(&table.render_text());
@@ -3640,6 +4288,62 @@ impl PdfDocument {
     fn reverse_rtl_visual_order_runs(spans: &mut Vec<TextSpan>) {
         use crate::text::rtl_detector::is_rtl_text;
 
+        // Pass 0: reverse visual-order characters inside a single span
+        // when the producer clearly emitted pre-shaped Arabic.
+        //
+        // Some PDFs (e.g. `ArabicCIDTrueType.pdf` in the pdfjs regression
+        // corpus) emit Arabic with an entire line as a single Tj-produced
+        // span whose `text` is stored in *visual* order — rightmost
+        // rendered glyph first. That matches what the content stream
+        // literally drew on the page, but downstream consumers expect
+        // reading-order (logical) text.
+        //
+        // The gate for reversal is the presence of **Arabic Presentation
+        // Forms A or B** (U+FB50-U+FDFF, U+FE70-U+FEFF). Those code points
+        // only appear when the PDF producer has explicitly pre-shaped the
+        // glyphs, and producers that pre-shape almost universally also
+        // store them in visual order because that's the order the content
+        // stream draws them. Plain base-Arabic text (U+0600-U+06FF) is
+        // left alone because those files are usually already in logical
+        // order — the PDF viewer applies shaping and bidi reordering at
+        // render time, so reversing would produce a wrong result.
+        //
+        // We still require at least 4 characters and >50 % non-whitespace
+        // RTL ratio so that punctuation or stray markers adjacent to
+        // Arabic do not trigger a reversal.
+        //
+        // Pass 1 below handles the other common shape where each Arabic
+        // character is emitted as its own short span and the reversal is
+        // a span-granularity concern. The two passes are independent:
+        // a span either fires Pass 0 (pre-shaped, reverse in place) or
+        // Pass 1 (per-glyph spans, reverse span order), never both.
+        //
+        // This is separate from `normalize_arabic_presentation_forms`,
+        // which runs later on the assembled output string and unshapes
+        // contextual glyphs back to their base Unicode letters.
+        for span in spans.iter_mut() {
+            let mut total = 0usize;
+            let mut rtl_count = 0usize;
+            let mut has_presentation_form = false;
+            for c in span.text.chars() {
+                if c.is_whitespace() {
+                    continue;
+                }
+                total += 1;
+                let cp = c as u32;
+                if is_rtl_text(cp) {
+                    rtl_count += 1;
+                }
+                if (0xFB50..=0xFDFF).contains(&cp) || (0xFE70..=0xFEFF).contains(&cp) {
+                    has_presentation_form = true;
+                }
+            }
+            if has_presentation_form && total >= 4 && rtl_count * 2 > total {
+                let reversed: String = span.text.chars().rev().collect();
+                span.text = reversed;
+            }
+        }
+
         if spans.len() < 4 {
             return;
         }
@@ -4038,8 +4742,21 @@ impl PdfDocument {
                 },
                 Some("Btn") => {
                     if ff & field_flags::PUSH_BUTTON != 0 {
-                        // Push button: skip (action trigger, no data value)
-                        None
+                        // Push button: caption is in /MK /CA per PDF Spec
+                        // ISO 32000-1:2008 §12.5.6.19 (Appearance Characteristics
+                        // Dictionary). Extracting it lets screen readers and
+                        // text-extraction consumers see the button label.
+                        dict.get("MK")
+                            .and_then(|mk| mk.as_dict())
+                            .and_then(|mk| Self::parse_string_value_static(mk.get("CA")))
+                            .and_then(|s| {
+                                let t = s.trim().to_string();
+                                if t.is_empty() {
+                                    None
+                                } else {
+                                    Some(t)
+                                }
+                            })
                     } else {
                         // Checkbox or radio button
                         let value = Self::parse_string_value_static(dict.get("V"))
@@ -5126,13 +5843,10 @@ impl PdfDocument {
                 "Found {} text spans without MCID (including form field widgets) - appending sorted by position",
                 spans_without_mcid.len()
             );
-            // Sort by Y descending (top→bottom), then X ascending (left→right)
+            // Row-aware sort: Y-band descending (top→bottom), then X
+            // ascending (left→right within a row).
             spans_without_mcid.sort_by(|a, b| {
-                let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
-                if y_cmp != std::cmp::Ordering::Equal {
-                    return y_cmp;
-                }
-                crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+                crate::utils::row_aware_span_cmp(a.bbox.y, a.bbox.x, b.bbox.y, b.bbox.x)
             });
             for span in &spans_without_mcid {
                 if let Some(prev) = prev_span {
@@ -5198,16 +5912,13 @@ impl PdfDocument {
     pub fn extract_spans(&mut self, page_index: usize) -> Result<Vec<crate::layout::TextSpan>> {
         let mut spans = self.extract_spans_raw(page_index)?;
 
-        // Sort spans by reading order (Y-descending, then X-ascending)
+        // Row-aware reading order: Y-band descending (top→bottom), X
+        // ascending within a row.
         spans.sort_by(|a, b| {
-            // Y-descending (top-to-bottom)
-            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
-            if y_cmp != std::cmp::Ordering::Equal {
-                return y_cmp;
-            }
-            // X-ascending (left-to-right)
-            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+            crate::utils::row_aware_span_cmp(a.bbox.y, a.bbox.x, b.bbox.y, b.bbox.x)
         });
+        // Lift multi-row-spanning labels to the top of their block.
+        Self::reorder_rowspan_labels(&mut spans);
 
         // Filter out spans in erase regions
         if let Some(regions) = self.erase_regions.get(&page_index) {
@@ -5326,13 +6037,9 @@ impl PdfDocument {
         // Apply reading order strategy
         match reading_order {
             ReadingOrder::TopToBottom => {
-                // Same sort as extract_spans: Y-descending, X-ascending
+                // Row-aware sort: Y-band descending, then X ascending.
                 spans.sort_by(|a, b| {
-                    let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
-                    if y_cmp != std::cmp::Ordering::Equal {
-                        return y_cmp;
-                    }
-                    crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+                    crate::utils::row_aware_span_cmp(a.bbox.y, a.bbox.x, b.bbox.y, b.bbox.x)
                 });
             },
             ReadingOrder::ColumnAware => {
@@ -5656,11 +6363,7 @@ impl PdfDocument {
                 let config = crate::extractors::TextExtractionConfig::new().with_profile(p);
                 let mut s = self.extract_spans_raw_with_extraction_config(page_index, config)?;
                 s.sort_by(|a, b| {
-                    let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
-                    if y_cmp != std::cmp::Ordering::Equal {
-                        return y_cmp;
-                    }
-                    crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+                    crate::utils::row_aware_span_cmp(a.bbox.y, a.bbox.x, b.bbox.y, b.bbox.x)
                 });
                 if let Some(regions) = self.erase_regions.get(&page_index) {
                     s.retain(|span| !regions.iter().any(|r| r.intersects(&span.bbox)));
@@ -5800,11 +6503,7 @@ impl PdfDocument {
                 let config = crate::extractors::TextExtractionConfig::new().with_profile(p);
                 let mut s = self.extract_spans_raw_with_extraction_config(page_index, config)?;
                 s.sort_by(|a, b| {
-                    let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
-                    if y_cmp != std::cmp::Ordering::Equal {
-                        return y_cmp;
-                    }
-                    crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+                    crate::utils::row_aware_span_cmp(a.bbox.y, a.bbox.x, b.bbox.y, b.bbox.x)
                 });
                 if let Some(regions) = self.erase_regions.get(&page_index) {
                     s.retain(|span| !regions.iter().any(|r| r.intersects(&span.bbox)));
@@ -10387,6 +11086,128 @@ mod tests {
     }
 
     // ========================================================================
+    // reverse_rtl_visual_order_runs tests (issue #330)
+    // ========================================================================
+    //
+    // These tests cover the two distinct RTL span shapes pdf_oxide sees
+    // in the wild and make sure future changes don't regress either:
+    //
+    // 1. **Pre-shaped visual-order single span** — one `TextSpan` per
+    //    line whose `text` already contains contextual Arabic glyphs
+    //    (U+FB50-U+FDFF / U+FE70-U+FEFF) in the order the content
+    //    stream drew them (rightmost glyph first). This is the
+    //    `ArabicCIDTrueType.pdf` pdfjs test fixture case. Expected:
+    //    character sequence gets reversed in place.
+    //
+    // 2. **Plain base-Arabic logical-order single span** — one
+    //    `TextSpan` per line whose `text` uses base Arabic (U+0621-
+    //    U+06FF) characters in logical / reading order, as most
+    //    well-behaved PDF producers emit. Expected: span is left
+    //    completely alone (no reversal, no shape changes).
+    //
+    // The gate that protects case 2 from case 1's reversal is the
+    // `has_presentation_form` check inside `reverse_rtl_visual_order_runs`.
+
+    fn make_rtl_test_span(text: &str, x: f32, y: f32) -> TextSpan {
+        TextSpan {
+            text: text.to_string(),
+            bbox: crate::geometry::Rect::new(x, y, 100.0, 12.0),
+            font_size: 12.0,
+            ..TextSpan::default()
+        }
+    }
+
+    #[test]
+    fn test_reverse_rtl_preshaped_single_span() {
+        // "ArabicCIDTrueType.pdf" shape: one span per line, glyphs in
+        // visual / right-to-left rendering order, mixing presentation
+        // form `ﳋ` (U+FCCB) with base Arabic characters. The helper
+        // must reverse this into reading order so downstream consumers
+        // see logical Arabic even though the content stream is visual.
+        let mut spans = vec![
+            make_rtl_test_span(
+                "\u{0629}\u{064A}\u{0628}\u{0631}\u{0639}\u{0644}\u{0627} \
+                                \u{0637}\u{0648}\u{0637}\u{FCCB}\u{0627} \
+                                \u{0639}\u{0627}\u{0648}\u{0646}\u{0627}",
+                100.0,
+                700.0,
+            ),
+            make_rtl_test_span("other content", 100.0, 680.0),
+            make_rtl_test_span("more content", 100.0, 660.0),
+            make_rtl_test_span("tail", 100.0, 640.0),
+        ];
+        PdfDocument::reverse_rtl_visual_order_runs(&mut spans);
+        // After reversal, the first span should read as
+        // "انواع اﳋطوط العربية" — the logical reading order. The
+        // exact string comparison is the reversal of the input.
+        assert_eq!(
+            spans[0].text,
+            "\u{0627}\u{0646}\u{0648}\u{0627}\u{0639} \
+             \u{0627}\u{FCCB}\u{0637}\u{0648}\u{0637} \
+             \u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064A}\u{0629}",
+            "Pre-shaped Arabic single span must be reversed into reading order"
+        );
+        // Other non-RTL spans must be untouched.
+        assert_eq!(spans[1].text, "other content");
+        assert_eq!(spans[2].text, "more content");
+        assert_eq!(spans[3].text, "tail");
+    }
+
+    #[test]
+    fn test_reverse_rtl_logical_order_base_arabic_untouched() {
+        // Most Arabic PDFs store text in logical (reading) order using
+        // base characters (U+0621-U+06FF) and rely on the renderer to
+        // apply shaping at display time. pdf_oxide must leave those
+        // spans alone — reversing them would garble correct output.
+        //
+        // The string below is "انواع الخطوط العربية" entirely composed
+        // of base Arabic code points (no presentation forms). Gate:
+        // `has_presentation_form` stays false, no reversal happens.
+        let logical = "\u{0627}\u{0646}\u{0648}\u{0627}\u{0639} \
+                       \u{0627}\u{0644}\u{062E}\u{0637}\u{0648}\u{0637} \
+                       \u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064A}\u{0629}";
+        let mut spans = vec![
+            make_rtl_test_span(logical, 100.0, 700.0),
+            make_rtl_test_span("other content", 100.0, 680.0),
+            make_rtl_test_span("more content", 100.0, 660.0),
+            make_rtl_test_span("tail", 100.0, 640.0),
+        ];
+        PdfDocument::reverse_rtl_visual_order_runs(&mut spans);
+        assert_eq!(spans[0].text, logical, "Logical-order base-Arabic span must NOT be reversed");
+    }
+
+    #[test]
+    fn test_reverse_rtl_short_rtl_span_not_touched_by_pass0() {
+        // Pass 0 requires at least 4 non-whitespace characters. A
+        // two-character Arabic snippet must not trigger reversal even
+        // though it contains presentation forms.
+        let mut spans = vec![
+            make_rtl_test_span("\u{FB7F}\u{FEB3}", 100.0, 700.0),
+            make_rtl_test_span("other content", 100.0, 680.0),
+            make_rtl_test_span("more content", 100.0, 660.0),
+            make_rtl_test_span("tail", 100.0, 640.0),
+        ];
+        PdfDocument::reverse_rtl_visual_order_runs(&mut spans);
+        assert_eq!(spans[0].text, "\u{FB7F}\u{FEB3}");
+    }
+
+    #[test]
+    fn test_reverse_rtl_pass0_leaves_ltr_alone() {
+        // Pure Latin spans never trip the RTL heuristic — `rtl_count`
+        // is zero so the majority gate fails.
+        let mut spans = vec![
+            make_rtl_test_span("The quick brown fox jumps over", 100.0, 700.0),
+            make_rtl_test_span("the lazy dog repeatedly.", 100.0, 680.0),
+            make_rtl_test_span("Latin content here.", 100.0, 660.0),
+            make_rtl_test_span("Final line.", 100.0, 640.0),
+        ];
+        let before: Vec<String> = spans.iter().map(|s| s.text.clone()).collect();
+        PdfDocument::reverse_rtl_visual_order_runs(&mut spans);
+        let after: Vec<String> = spans.iter().map(|s| s.text.clone()).collect();
+        assert_eq!(before, after, "Pure-Latin spans must not be reversed by the RTL pass");
+    }
+
+    // ========================================================================
     // decode_pdf_escapes tests
     // ========================================================================
 
@@ -13174,6 +13995,136 @@ mod tests {
         let _text = doc
             .extract_text(0)
             .expect("extract_text should work after auth");
+    }
+
+    /// Multi-row-spanning label cell (test item name vertically centered
+    /// across N data rows) must be placed at the top of its row block in
+    /// reading-order output, not interleaved mid-group by Y.
+    ///
+    /// Simulates a simplified 2-column table:
+    /// - Column A (sparse, "labels"): 2 labels, each centered in its
+    ///   block of 6 data rows.
+    /// - Column B (dense, "data"): 12 data rows.
+    ///
+    /// Expected sort: Label1, d1..d6, Label2, d7..d12.
+    #[test]
+    fn test_rowspan_label_promoted_to_top_of_block() {
+        use crate::layout::TextSpan;
+
+        fn mk(text: &str, x: f32, y: f32, w: f32) -> TextSpan {
+            TextSpan {
+                artifact_type: None,
+                text: text.to_string(),
+                bbox: crate::geometry::Rect::new(x, y, w, 10.0),
+                font_size: 12.0,
+                font_name: "Arial".into(),
+                font_weight: crate::layout::FontWeight::Normal,
+                is_italic: false,
+                is_monospace: false,
+                color: crate::layout::Color::black(),
+                mcid: None,
+                sequence: 0,
+                split_boundary_before: false,
+                offset_semantic: false,
+                char_spacing: 0.0,
+                word_spacing: 0.0,
+                horizontal_scaling: 100.0,
+                primary_detected: false,
+                char_widths: vec![],
+            }
+        }
+
+        // Data rows at x=200, y=100..30 step -10 (12 rows).
+        // Label1 at x=50, y=75 (middle of rows 100..60).
+        // Label2 at x=50, y=45 (middle of rows 50..30... but actually 50..30 is 3 values,
+        //   and label2 should be centered in rows 50..30 → y=40 but we choose 45 to be clearly in 2nd block).
+        // Target split: Label1 owns rows 100,90,80,70,60,50; Label2 owns 40,30,20,10.
+        // Both labels' Y (75 and 45) sit between their block rows.
+        let mut spans = vec![mk("L1", 50.0, 75.0, 40.0), mk("L2", 50.0, 45.0, 40.0)];
+        for i in 0..12 {
+            let y = 100.0 - (i as f32) * 10.0;
+            spans.push(mk(&format!("d{:02}", i), 200.0, y, 20.0));
+        }
+
+        super::PdfDocument::reorder_rowspan_labels(&mut spans);
+
+        let texts: Vec<&str> = spans.iter().map(|s| s.text.as_str()).collect();
+        // L1 must come first, L2 must come before its own block.
+        let pos_l1 = texts.iter().position(|t| *t == "L1").expect("L1 present");
+        let pos_l2 = texts.iter().position(|t| *t == "L2").expect("L2 present");
+        assert!(pos_l1 < pos_l2, "L1 should precede L2 in reading order, got {:?}", texts);
+        // L1 must come before ALL data rows that belong to L1's block.
+        // With distance-based partitioning, L1 owns rows closer to y=75 than y=45:
+        //   100,90,80,70,60 are closer to 75. 50 is equidistant (tie → L1).
+        //   Expect L1 at index 0 and L2 somewhere after L1's block.
+        assert_eq!(texts[0], "L1", "L1 must be first, got: {:?}", &texts[..5]);
+        // At least some data row must be between L1 and L2.
+        assert!(
+            pos_l2 > pos_l1 + 3,
+            "L2 must come after several data rows of L1's block, got {:?}",
+            texts
+        );
+    }
+
+    /// AES-256 (V=5, R=6) PDF that only authenticates via the owner
+    /// password with an empty input. Exercises Algorithm 2.B termination
+    /// (off-by-one would produce a wrong file encryption key) plus the
+    /// end-to-end string decryption path that surfaces annotation text.
+    ///
+    /// Marked `#[ignore]` because the binary fixture
+    /// `tests/fixtures/encrypted_aes256_r6_owner_password.pdf` is not
+    /// currently checked into the repository. Run with
+    /// `cargo test -- --ignored` once the fixture is restored. The
+    /// equivalent behaviour is exercised end-to-end by
+    /// `scripts/validate_issue_fixes.sh` against
+    /// `pdfs_pdfjs/pr6531_2.pdf` from the local test corpus.
+    #[test]
+    #[ignore = "requires tests/fixtures/encrypted_aes256_r6_owner_password.pdf — not checked in"]
+    fn test_encrypted_aes256_r6_owner_password_empty() {
+        let pdf_path = "tests/fixtures/encrypted_aes256_r6_owner_password.pdf";
+        assert!(
+            std::path::Path::new(pdf_path).exists(),
+            "fixture missing at {pdf_path} — restore it before running this test"
+        );
+        let mut doc = PdfDocument::open(pdf_path).expect("open should succeed");
+        assert!(doc.is_encrypted(), "fixture is AES-256 encrypted");
+        let text = doc.extract_text(0).expect("extract_text should succeed");
+        assert!(
+            text.contains("Bluebeam should be encrypting this."),
+            "expected annotation text in extracted output, got: {:?}",
+            text
+        );
+    }
+
+    /// Copy-protected (AES-256, V=5, R=6) PDFs with widget text must
+    /// decrypt string values inside object dictionaries so that form
+    /// field content appears in `extract_text` output. Without per-object
+    /// string decryption, the page renders as an empty string.
+    ///
+    /// Marked `#[ignore]` because the binary fixture
+    /// `tests/fixtures/encrypted_aes256_widget.pdf` is not currently
+    /// checked into the repository. Run with `cargo test -- --ignored`
+    /// once the fixture is restored. The equivalent behaviour is
+    /// exercised end-to-end by `scripts/validate_issue_fixes.sh`
+    /// against `pdfs_pdfjs/secHandler.pdf` from the local test corpus.
+    #[test]
+    #[ignore = "requires tests/fixtures/encrypted_aes256_widget.pdf — not checked in"]
+    fn test_encrypted_aes256_widget_decrypts_string_values() {
+        let pdf_path = "tests/fixtures/encrypted_aes256_widget.pdf";
+        assert!(
+            std::path::Path::new(pdf_path).exists(),
+            "fixture missing at {pdf_path} — restore it before running this test"
+        );
+
+        let mut doc = PdfDocument::open(pdf_path).expect("open should succeed");
+        assert!(doc.is_encrypted(), "fixture is AES-256 encrypted");
+
+        let text = doc.extract_text(0).expect("extract_text should succeed");
+        assert!(
+            text.contains("Security Handler"),
+            "expected widget text 'Security Handler' in extracted text, got: {:?}",
+            text
+        );
     }
 
     /// PDFs that are encrypted but authenticated with empty password (the common

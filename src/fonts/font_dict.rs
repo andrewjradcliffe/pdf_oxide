@@ -3043,6 +3043,23 @@ impl FontInfo {
         self.get_font_weight().is_bold()
     }
 
+    /// Return true when this font's per-glyph widths come from the PDF's
+    /// `/Widths` array (for simple fonts) or `/W` array (for Type0/CID
+    /// fonts), rather than from the generic 500/550/600-thousandths-of-em
+    /// fallback that `FontInfo::new` uses when neither is present.
+    ///
+    /// Callers use this to decide whether `byte_to_width_table` is
+    /// trustworthy: when it returns false, every glyph reports the same
+    /// fallback advance, so bounding-box widths computed from those
+    /// advances systematically over- or under-estimate the visible text
+    /// extent. On affected PDFs that collapses the real gap between
+    /// adjacent `Tj`-positioned words, gluing words together in
+    /// `extract_text` output even though the PDF itself places them on
+    /// distinct positions. See issue #328.
+    pub fn has_explicit_widths(&self) -> bool {
+        self.widths.is_some() || self.cid_widths.is_some()
+    }
+
     /// Check if this font is likely italic based on the font name.
     ///
     /// This is a heuristic check looking for "Italic" or "Oblique" in the font name.

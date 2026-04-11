@@ -9,9 +9,11 @@ yarn.lock
 *.dylib
 *.dll
 
-# npm
+# npm publish staging
 dist/
-npm/
+# Note: js/npm/<triple>/ directories ARE tracked (they hold per-platform
+# subpackage templates — see js/npm/README.md). The build-time `.node`
+# files dropped into them by CI are excluded by the *.node rule above.
 
 # IDE
 .vscode/

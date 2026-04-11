@@ -255,8 +255,15 @@ jobs:
           path: wasm-out/
           retention-days: 7
 
-  # Build native shared libraries for language bindings (cdylib)
-  # These are used by Go (CGo), JS (N-API), and C# (P/Invoke)
+  # Build native libraries for language bindings (cdylib + staticlib).
+  # cdylib (.so/.dylib/.dll): C# (P/Invoke), dynamic-linked Node.js
+  # staticlib (.a):           Go CGo (#334), static-linked Node.js (#335)
+  #
+  # The extra windows-gnu rows cross-compile from Linux via mingw-w64 so we
+  # produce a MinGW-compatible `libpdf_oxide.a` that CGo (which uses MinGW
+  # gcc by default) can actually link. MSVC's `pdf_oxide.lib` is a COFF
+  # archive and isn't link-compatible with MinGW gcc, so those targets stay
+  # cdylib-only and feed the C# / dynamic Node.js bindings.
   build-native-libs:
     name: Build native lib (${{ matrix.target }})
     needs: validate
@@ -269,26 +276,38 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: native-linux-x86_64
             lib_name: libpdf_oxide.so
+            staticlib_name: libpdf_oxide.a
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: native-linux-aarch64
             lib_name: libpdf_oxide.so
+            staticlib_name: libpdf_oxide.a
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: native-macos-x86_64
             lib_name: libpdf_oxide.dylib
+            staticlib_name: libpdf_oxide.a
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: native-macos-aarch64
             lib_name: libpdf_oxide.dylib
+            staticlib_name: libpdf_oxide.a
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: native-windows-x86_64
             lib_name: pdf_oxide.dll
+            staticlib_name: pdf_oxide.lib
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             artifact_name: native-windows-aarch64
             lib_name: pdf_oxide.dll
+            staticlib_name: pdf_oxide.lib
+          # Cross-compiled MinGW build — used only by Go CGo on Windows x64.
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            artifact_name: native-windows-x86_64-gnu
+            lib_name: pdf_oxide.dll
+            staticlib_name: libpdf_oxide.a
     steps:
       - uses: actions/checkout@v6
 
@@ -311,16 +330,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Build cdylib
+      - name: Install cross-compilation tools (Windows GNU)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build cdylib + staticlib
         shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ contains(matrix.target, 'aarch64-unknown-linux') && 'aarch64-linux-gnu-gcc' || '' }}
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: ${{ matrix.target == 'x86_64-pc-windows-gnu' && 'x86_64-w64-mingw32-gcc' || '' }}
         run: |
           cargo build --release --lib --target ${{ matrix.target }}
           mkdir -p native-out
+          # Shared library (cdylib) — always present
           cp target/${{ matrix.target }}/release/${{ matrix.lib_name }} native-out/
+          # Static library (staticlib) — produced because Cargo.toml lists
+          # "staticlib" in crate-type. File name differs between MSVC (.lib)
+          # and GNU/Unix (.a).
+          cp target/${{ matrix.target }}/release/${{ matrix.staticlib_name }} native-out/
           # Also copy the C header
           cp include/pdf_oxide_c/pdf_oxide.h native-out/
+          ls -la native-out/
 
       - name: Upload native lib
         uses: actions/upload-artifact@v7
@@ -348,16 +380,27 @@ jobs:
 
       - name: Stage native libs in Go module
         run: |
-          # Map artifact names to Go platform dirs
-          cp native-libs/native-linux-x86_64/libpdf_oxide.so go/lib/linux_amd64/
-          cp native-libs/native-linux-aarch64/libpdf_oxide.so go/lib/linux_arm64/
-          cp native-libs/native-macos-x86_64/libpdf_oxide.dylib go/lib/darwin_amd64/
-          cp native-libs/native-macos-aarch64/libpdf_oxide.dylib go/lib/darwin_arm64/
-          cp native-libs/native-windows-x86_64/pdf_oxide.dll go/lib/windows_amd64/
+          # #334: ship staticlib archives (.a) so Go binaries are self-contained.
+          # Remove any stale shared-library artifacts from previous releases so
+          # git doesn't continue tracking them after the v0.3.25 switch-over.
+          find go/lib -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) -delete
+
+          cp native-libs/native-linux-x86_64/libpdf_oxide.a   go/lib/linux_amd64/
+          cp native-libs/native-linux-aarch64/libpdf_oxide.a  go/lib/linux_arm64/
+          cp native-libs/native-macos-x86_64/libpdf_oxide.a   go/lib/darwin_amd64/
+          cp native-libs/native-macos-aarch64/libpdf_oxide.a  go/lib/darwin_arm64/
+
+          # Windows x64: MinGW-compiled staticlib (from the x86_64-pc-windows-gnu
+          # cross-compile row) — compatible with CGo's default MinGW gcc linker.
+          cp native-libs/native-windows-x86_64-gnu/libpdf_oxide.a go/lib/windows_amd64/
+
+          # Windows ARM64: no supported GNU toolchain yet, stay on dynamic .dll
+          # until gnullvm stabilises. Ship the cdylib from the MSVC build so the
+          # existing fallback CGo directive keeps working.
           cp native-libs/native-windows-aarch64/pdf_oxide.dll go/lib/windows_arm64/ 2>/dev/null || true
 
           echo "=== Go native libs staged ==="
-          find go/lib -type f -not -name ".gitkeep" -not -name "README.md" | sort
+          find go/lib -type f -not -name ".gitkeep" -not -name "README.md" -not -name ".ci-build" | sort
 
       - name: Commit and push native libs
         run: |
@@ -366,7 +409,9 @@ jobs:
           # Marker file is checked by .githooks/pre-commit to distinguish
           # CI-authored native-lib commits from accidental local dev commits.
           echo "$GITHUB_SHA" > go/lib/.ci-build
-          git add go/lib/
+          # -A captures deletions too — important when we switch from .so/.dylib
+          # /.dll to .a and need to drop the old files in the same commit (#334).
+          git add -A go/lib/
           if git diff --cached --quiet; then
             echo "No changes to native libs"
           else
@@ -382,9 +427,75 @@ jobs:
           git tag "go/v${VERSION}"
           git push origin "go/v${VERSION}"
 
-  # Build Node.js native addon (pdf-oxide npm package)
+  # Clean-room verification that `go get` works against the just-published tag
+  # across real platforms. This is the gate called out in #334 that would have
+  # caught the v0.3.24 .gitignore/staticlib regression before shipping.
+  verify-go-install:
+    name: Verify go get (${{ matrix.os }})
+    needs: [validate, update-go-native-libs]
+    runs-on: ${{ matrix.os }}
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build a fresh consumer against go/v${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION="${{ needs.validate.outputs.version }}"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+          go mod init verify
+          # Subdirectory-module tag is `go/v<version>` on the git side, but
+          # `go get` consumers still reference it as `@v<version>` — Go's
+          # module resolver translates the prefix automatically.
+          go get "github.com/yfedoseev/pdf_oxide/go@v${VERSION}"
+          cat > main.go <<'EOT'
+          package main
+
+          import (
+            "fmt"
+            "os"
+
+            pdfoxide "github.com/yfedoseev/pdf_oxide/go"
+          )
+
+          func main() {
+            pdf, err := pdfoxide.FromMarkdown("# verify-go-install\n")
+            if err != nil { fmt.Println("fromMarkdown:", err); os.Exit(1) }
+            defer pdf.Close()
+            out := "out.pdf"
+            if err := pdf.Save(out); err != nil { fmt.Println("save:", err); os.Exit(1) }
+
+            doc, err := pdfoxide.Open(out)
+            if err != nil { fmt.Println("open:", err); os.Exit(1) }
+            defer doc.Close()
+            n, err := doc.PageCount()
+            if err != nil { fmt.Println("pageCount:", err); os.Exit(1) }
+            fmt.Printf("ok pages=%d\n", n)
+          }
+          EOT
+          go build -o verify ./...
+          # Prove the binary is self-contained: no runtime lookup of libpdf_oxide.
+          unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH
+          ./verify
+
+  # Build Node.js native addon — one platform subpackage per matrix row (#335).
+  #
+  # Each row downloads the Rust staticlib artifact for its target, stages it
+  # at <repo>/lib/ where js/binding.gyp expects it, runs `node-gyp rebuild` to
+  # produce a real `pdf_oxide.node` addon (this is the step that v0.3.24 never
+  # actually performed), and lays out the result at js/npm/<triple>/ as a
+  # ready-to-publish platform subpackage for the `publish-npm-platforms` job.
   build-nodejs:
-    name: Build Node.js (${{ matrix.artifact_name }})
+    name: Build Node.js (${{ matrix.triple }})
     needs: [validate, build-native-libs]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -392,30 +503,20 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: nodejs-linux-x64
+            triple: linux-x64-gnu
             native_artifact: native-linux-x86_64
-            node_platform: linux
-            node_arch: x64
-          - os: ubuntu-latest
-            artifact_name: nodejs-linux-arm64
+          - os: ubuntu-24.04-arm
+            triple: linux-arm64-gnu
             native_artifact: native-linux-aarch64
-            node_platform: linux
-            node_arch: arm64
           - os: macos-latest
-            artifact_name: nodejs-macos-x64
+            triple: darwin-x64
             native_artifact: native-macos-x86_64
-            node_platform: darwin
-            node_arch: x64
           - os: macos-latest
-            artifact_name: nodejs-macos-arm64
+            triple: darwin-arm64
             native_artifact: native-macos-aarch64
-            node_platform: darwin
-            node_arch: arm64
           - os: windows-latest
-            artifact_name: nodejs-windows-x64
+            triple: win32-x64-msvc
             native_artifact: native-windows-x86_64
-            node_platform: win32
-            node_arch: x64
     steps:
       - uses: actions/checkout@v6
 
@@ -424,35 +525,55 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Download native library
+      - name: Download Rust staticlib artifact
         uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.native_artifact }}
-          path: js/build/Release/
+          path: lib/
 
-      - name: Prepare npm package
+      - name: Install npm dependencies (no optional platform packages)
+        working-directory: js
+        shell: bash
+        # --omit=optional skips the pdf_oxide-<triple> packages listed as
+        # optionalDependencies — they don't exist in the registry yet at build
+        # time (we're about to publish them), and we don't need them to build.
+        run: npm install --omit=optional --ignore-scripts
+
+      - name: Build native addon with node-gyp
+        working-directory: js
+        shell: bash
+        run: |
+          ls -la ../lib/
+          npx node-gyp rebuild
+          ls -la build/Release/
+
+      - name: Stage platform subpackage
         working-directory: js
         shell: bash
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
-          # Bundle the native lib, JS wrapper, and type definitions
-          mkdir -p dist
-          cp build/Release/* dist/ 2>/dev/null || true
-          cp pdf_oxide.js dist/
-          cp pdf_oxide.d.ts dist/
-          cp index.js dist/ 2>/dev/null || true
-          cp index.d.ts dist/ 2>/dev/null || true
-          cp package.json dist/
-          cp binding.cc dist/ 2>/dev/null || true
-          # Create platform-specific tarball
-          cd dist
-          tar czf ../${{ matrix.artifact_name }}-${VERSION}.tar.gz .
+          TRIPLE="${{ matrix.triple }}"
+          SUBPKG="npm/${TRIPLE}"
+          test -d "$SUBPKG" || { echo "missing $SUBPKG template"; exit 1; }
+          # Rename the default pdf_oxide.node output to the triple-qualified
+          # name that the subpackage's package.json "main" field references.
+          cp build/Release/pdf_oxide.node "$SUBPKG/pdf_oxide.${TRIPLE}.node"
+          # Version is templated to 0.3.25 in the committed package.json; if
+          # the release version differs, sync it with a minimal in-place edit.
+          node -e "
+            const fs = require('fs');
+            const p = '$SUBPKG/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            pkg.version = '${VERSION}';
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          "
+          ls -la "$SUBPKG/"
 
-      - name: Upload Node.js package
+      - name: Upload platform subpackage
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
-          path: js/${{ matrix.artifact_name }}-*.tar.gz
+          name: nodejs-${{ matrix.triple }}
+          path: js/npm/${{ matrix.triple }}/
           retention-days: 7
 
   # Build C# NuGet package
@@ -466,7 +587,11 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          # #333 targets net8.0 + net10.0, so both SDKs must be present for
+          # `dotnet pack` to emit both TFM outputs.
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Download all native libraries
         uses: actions/download-artifact@v8
@@ -499,6 +624,51 @@ jobs:
         working-directory: csharp/PdfOxide
         run: |
           dotnet pack -c Release -o ../../nuget-out /p:Version=${{ needs.validate.outputs.version }}
+
+      - name: Verify NativeAOT publish (#333)
+        working-directory: csharp/PdfOxide
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Prove the binding is AOT-safe: publish a tiny consumer with
+          # PublishAot=true on net10.0 and make sure the trim/AOT analyzer
+          # surfaces no warnings. If LibraryImport regressed, this step fails
+          # with clear IL2026/IL3050 diagnostics instead of a silent runtime
+          # crash in an end-user's published binary.
+          AOT_DIR="$(mktemp -d)"
+          mkdir -p "$AOT_DIR/AotSmoke"
+          cat > "$AOT_DIR/AotSmoke/AotSmoke.csproj" <<'EOT'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net10.0</TargetFramework>
+              <Nullable>enable</Nullable>
+              <PublishAot>true</PublishAot>
+              <InvariantGlobalization>true</InvariantGlobalization>
+              <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+            </PropertyGroup>
+            <ItemGroup>
+              <ProjectReference Include="../../PdfOxide.csproj" />
+            </ItemGroup>
+          </Project>
+          EOT
+          cat > "$AOT_DIR/AotSmoke/Program.cs" <<'EOT'
+          using PdfOxide.Core;
+
+          using var pdf = Pdf.FromMarkdown("# verify-csharp-aot\n\nbody text.");
+          var outPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "verify.pdf");
+          pdf.Save(outPath);
+          using var doc = PdfDocument.Open(outPath);
+          System.Console.WriteLine($"ok pages={doc.PageCount}");
+          EOT
+          # Link the temp project into the solution via a file symlink so
+          # ProjectReference's relative path resolves to the real library.
+          ln -s "$PWD" "$AOT_DIR/AotSmoke/PdfOxide.link"
+          # Rewrite the ProjectReference to absolute path (simpler than ln).
+          sed -i "s|../../PdfOxide.csproj|$PWD/PdfOxide.csproj|" "$AOT_DIR/AotSmoke/AotSmoke.csproj"
+          dotnet publish "$AOT_DIR/AotSmoke/AotSmoke.csproj" -c Release -r linux-x64 -o "$AOT_DIR/out"
+          # Run the AOT-compiled binary — no .NET runtime required.
+          "$AOT_DIR/out/AotSmoke" || { echo "AOT smoke test failed"; exit 1; }
 
       - name: Upload NuGet package
         uses: actions/upload-artifact@v7
@@ -866,10 +1036,58 @@ jobs:
           git commit -m "Update pdf-oxide to ${{ needs.validate.outputs.version }}"
           git push
 
-  # Publish Node.js native package to npm (pdf-oxide)
+  # (#335) Publish per-platform Node.js native subpackages to npm. Each one
+  # contains a single prebuilt .node file plus a minimal package.json with
+  # the right `os`/`cpu`/`libc` fields so npm only resolves it on matching
+  # platforms. The main `pdf-oxide` package declares these as
+  # `optionalDependencies` so end users get the right binding automatically,
+  # with zero install-time compilation.
+  publish-npm-platforms:
+    name: Publish platform subpackage (${{ matrix.triple }})
+    needs: [validate, build-nodejs, create-release]
+    runs-on: ubuntu-latest
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        triple:
+          - linux-x64-gnu
+          - linux-arm64-gnu
+          - darwin-x64
+          - darwin-arm64
+          - win32-x64-msvc
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download subpackage artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: nodejs-${{ matrix.triple }}
+          path: subpkg
+
+      - name: Show contents
+        run: ls -la subpkg/
+
+      - name: Publish subpackage
+        working-directory: subpkg
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # (#335) Publish the main `pdf-oxide` package. Runs after every platform
+  # subpackage has been published so that the `optionalDependencies` resolve
+  # cleanly for end users on the first post-release install. The published
+  # tarball ships only compiled `lib/`, type definitions, and README — no C++
+  # source, no binding.gyp, no install-time build hook. `npm publish` invokes
+  # the `prepack` script which runs `tsc` + the ESM-import fixer on the
+  # publishing machine (never on end-user machines).
   publish-npm-native:
     name: Publish to npm (pdf-oxide)
-    needs: [validate, build-nodejs, create-release]
+    needs: [validate, publish-npm-platforms, create-release]
     runs-on: ubuntu-latest
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
     steps:
@@ -881,11 +1099,66 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Install devDependencies (TypeScript etc.)
+        working-directory: js
+        run: npm install --omit=optional --ignore-scripts
+
       - name: Publish to npm
         working-directory: js
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # (#335) Clean-room install verification — the gate that would have caught
+  # v0.3.24 before it shipped. Spins up fresh project directories on Linux and
+  # macOS, runs `npm install pdf-oxide@<version>` with no devDependencies /
+  # Python / C++ toolchain on the runner, and executes a trivial
+  # FromMarkdown → Open → extractText flow. If this job fails, the release is
+  # broken and the npm packages should be `npm unpublish`'d within the 72-hour
+  # window.
+  verify-npm-install:
+    name: Verify npm install (${{ matrix.os }})
+    needs: [validate, publish-npm-native]
+    runs-on: ${{ matrix.os }}
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Clean-room install + smoke test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION="${{ needs.validate.outputs.version }}"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+          npm init -y
+          time npm install "pdf-oxide@${VERSION}"
+          cat > test.mjs <<'EOT'
+          import { Pdf, PdfDocument } from 'pdf-oxide';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          const out = join(tmpdir(), 'verify-npm-install.pdf');
+          const pdf = Pdf.fromMarkdown('# verify-npm-install\n\nbody text.');
+          pdf.save(out);
+          pdf.close?.();
+          const doc = PdfDocument.open(out);
+          try {
+            const n = doc.pageCount();
+            const text = String(doc.extractText(0) ?? '').slice(0, 40);
+            console.log(`ok pages=${n} text=${JSON.stringify(text)}`);
+            if (n < 1) { throw new Error('expected at least 1 page'); }
+          } finally {
+            doc.close?.();
+          }
+          EOT
+          node test.mjs
 
   # Publish C# NuGet package
   publish-nuget:

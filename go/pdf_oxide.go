@@ -1,11 +1,24 @@
 package pdfoxide
 
+// Static linking: each ${SRCDIR}/lib/<os_arch>/libpdf_oxide.a is the Rust
+// staticlib output (Cargo.toml crate-type). Linking the archive directly
+// (rather than via -L + -lpdf_oxide) produces a self-contained Go binary
+// with no runtime LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH lookup. See #334.
+//
+// The trailing system libraries are what rustc's stdlib + crypto deps need
+// when you static-link a Rust library. Regenerate the exact list per-target
+// with `cargo rustc --release --lib --target <triple> -- --print native-static-libs`
+// if link failures appear after a dependency bump.
+//
+// Windows ARM64 is still dynamic pending a gnullvm-based staticlib build;
+// users building Windows ARM64 Go binaries must ship pdf_oxide.dll alongside.
+
 /*
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib/linux_amd64 -lpdf_oxide -lm
-#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/lib/linux_arm64 -lpdf_oxide -lm
-#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/lib/darwin_amd64 -lpdf_oxide -lm
-#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib/darwin_arm64 -lpdf_oxide -lm
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/lib/windows_amd64 -lpdf_oxide
+#cgo linux,amd64 LDFLAGS: ${SRCDIR}/lib/linux_amd64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc
+#cgo linux,arm64 LDFLAGS: ${SRCDIR}/lib/linux_arm64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc
+#cgo darwin,amd64 LDFLAGS: ${SRCDIR}/lib/darwin_amd64/libpdf_oxide.a -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv
+#cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libpdf_oxide.a -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv
+#cgo windows,amd64 LDFLAGS: ${SRCDIR}/lib/windows_amd64/libpdf_oxide.a -lws2_32 -luserenv -lbcrypt -ladvapi32 -lcrypt32 -lsynchronization -lntdll -lkernel32 -lntoskrnl -lole32 -lshell32
 #cgo windows,arm64 LDFLAGS: -L${SRCDIR}/lib/windows_arm64 -lpdf_oxide
 #include <stdlib.h>
 #include <stdint.h>

@@ -43,17 +43,63 @@ impl<'a> OutlineBuilder for SkiaOutlineBuilder<'a> {
     }
 }
 
+/// Process-wide cache for the system font database.
+///
+/// `fontdb::Database::load_system_fonts()` walks every font directory on
+/// the host and parses each face it finds, which typically takes several
+/// seconds on first call. Before this cache was introduced, every
+/// `TextRasterizer::new()` (and therefore every `PageRenderer::new()`)
+/// paid that cost, and callers who constructed a fresh `PageRenderer`
+/// per page — which is the obvious first-draft usage from the Python /
+/// CLI surface — hit the scan once per page. A cold-cache ORAFOL 5400
+/// render took ~4.1 s on a warm machine for a single page because of
+/// this. See issue #331.
+///
+/// Switching to a process-wide `OnceLock<Arc<fontdb::Database>>` loads
+/// the database exactly once per process, and every subsequent
+/// `TextRasterizer` constructor takes a cheap `Arc::clone`. Wrapping
+/// in `Arc` is important so that the cache is still cheaply shareable
+/// across `TextRasterizer` instances in different rendering contexts
+/// without re-copying the full parsed font metadata. Callers that want
+/// a private / modified database can still construct one by hand and
+/// bypass this cache via `TextRasterizer::with_fontdb()`.
+static SYSTEM_FONTDB: std::sync::OnceLock<std::sync::Arc<fontdb::Database>> =
+    std::sync::OnceLock::new();
+
+fn system_fontdb() -> std::sync::Arc<fontdb::Database> {
+    SYSTEM_FONTDB
+        .get_or_init(|| {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            std::sync::Arc::new(db)
+        })
+        .clone()
+}
+
 /// Rasterizer for PDF text operations.
 pub struct TextRasterizer {
-    /// Font database for system font fallback
-    fontdb: fontdb::Database,
+    /// Font database for system font fallback.
+    ///
+    /// Shared across rasterizers via a process-wide `OnceLock` cache so
+    /// we don't re-scan the system font directories on every new
+    /// `PageRenderer`. See the `SYSTEM_FONTDB` docstring for the
+    /// measurement that motivated the switch.
+    fontdb: std::sync::Arc<fontdb::Database>,
 }
 
 impl TextRasterizer {
-    /// Create a new text rasterizer.
+    /// Create a new text rasterizer using the cached system font database.
     pub fn new() -> Self {
-        let mut fontdb = fontdb::Database::new();
-        fontdb.load_system_fonts();
+        Self {
+            fontdb: system_fontdb(),
+        }
+    }
+
+    /// Construct with a caller-supplied font database. Bypasses the
+    /// process-wide cache — useful for tests or callers that need to
+    /// pre-populate the database with non-system fonts.
+    #[allow(dead_code)]
+    pub fn with_fontdb(fontdb: std::sync::Arc<fontdb::Database>) -> Self {
         Self { fontdb }
     }
 
@@ -266,10 +312,25 @@ impl TextRasterizer {
             bytes.iter().map(|&b| char::from(b)).collect()
         };
 
-        // Filter control characters from failed encoding resolution
+        // Filter control characters from failed encoding resolution,
+        // and expand presentation-form ligature code points (fi, fl, ffi,
+        // ffl, st, ct, …) into their component letters so the shaper
+        // passes the cluster through as ordinary glyphs instead of
+        // dropping it or producing a lone box. `extract_text` already
+        // does this on the extraction path via
+        // `ligature_processor::get_ligature_components`; without the
+        // same decomposition on the render path, words like
+        // "Efficient" rasterize as "Effi  ert" because the shaper can't
+        // resolve the ligature cluster against the fallback system
+        // font. See issue #331 (R2).
         let mut filtered = String::with_capacity(raw_result.len());
         for c in raw_result.chars() {
-            if c >= '\x20' || c == '\t' || c == '\n' || c == '\r' {
+            if c < '\x20' && c != '\t' && c != '\n' && c != '\r' {
+                continue;
+            }
+            if let Some(components) = crate::text::ligature_processor::get_ligature_components(c) {
+                filtered.push_str(components);
+            } else {
                 filtered.push(c);
             }
         }
@@ -635,19 +696,49 @@ impl TextRasterizer {
             // Map cluster (Unicode byte offset) to character index
             let char_idx = cluster_to_char_idx.get(&cluster).copied().unwrap_or(0);
 
+            // Determine how many *source* characters this glyph represents.
+            // For normal 1:1 glyphs, cluster_chars == 1. For shaped
+            // ligatures like the "ffi" glyph (#331 R2), one glyph covers
+            // multiple characters and rustybuzz reports them with the
+            // same cluster index on every glyph of the cluster. Since we
+            // advance the output cursor by the sum of the PDF-declared
+            // widths of the *source* characters (per PDF §9.2.4 text-
+            // showing advance), we must add the widths of every source
+            // character in the ligature cluster to the cursor, not just
+            // the first character's width. Otherwise a ligature glyph
+            // draws wide but only advances by one character's worth, and
+            // subsequent glyphs overwrite the tail of the ligature —
+            // exactly the `Efficient` → `Effi ert` symptom reported in
+            // #331 on arxiv-style LaTeX-embedded fonts.
+            let next_cluster_byte: usize = info
+                .get(i + 1)
+                .map(|n| n.cluster as usize)
+                .unwrap_or(text.len());
+            let cluster_chars: usize = text[cluster..next_cluster_byte.min(text.len())]
+                .chars()
+                .count()
+                .max(1);
+
             // PDF Spec: tx = ((w0 * Tfs) + Tc + Tw) * Th
             // Priority:
-            // 1. Explicit /W or /DW from FontInfo (in 1000ths of em)
-            // 2. Shaped advance from rustybuzz (fallback)
-            let pdf_width = if let Some(info) = font_info {
-                let char_code = if info.subtype == "Type0" {
-                    // For Type0 fonts, use character index to look up CID
-                    *cids.get(char_idx).unwrap_or(&0)
-                } else {
-                    // For simple fonts, use the raw byte at the corresponding position
-                    *bytes.get(char_idx).unwrap_or(&0) as u16
-                };
-                info.get_glyph_width(char_code)
+            // 1. Explicit /W or /DW from FontInfo (in 1000ths of em),
+            //    summed across every source character in the cluster
+            //    so ligatures advance by the full cluster's width.
+            // 2. Shaped advance from rustybuzz (fallback, already
+            //    reflects the ligature's real width because it comes
+            //    from the font's horizontal metrics table).
+            let pdf_width = if let Some(font_info_ref) = font_info {
+                let mut sum = 0.0_f32;
+                for k in 0..cluster_chars {
+                    let idx = char_idx + k;
+                    let char_code = if font_info_ref.subtype == "Type0" {
+                        *cids.get(idx).unwrap_or(&0)
+                    } else {
+                        *bytes.get(idx).unwrap_or(&0) as u16
+                    };
+                    sum += font_info_ref.get_glyph_width(char_code);
+                }
+                sum
             } else {
                 // No FontInfo, use shaped advance
                 pos[i].x_advance as f32 / font_size * 1000.0

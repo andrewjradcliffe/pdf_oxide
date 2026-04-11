@@ -148,11 +148,22 @@ impl TableDetectionConfig {
 
 /// Validate that an extracted table is not a false positive.
 ///
-/// Rejects tables with too many empty cells (>60%).
+/// Rejects:
+/// - Tables with too many empty cells (> 60%).
+/// - 2-column tables that contain a **continuation-row signature**: any
+///   row whose left-hand cell is empty while the right-hand cell is
+///   non-empty. Product data sheets draw faint cell backgrounds behind
+///   label/value rows, which the spatial detector can cluster into tiny
+///   2-column tables; when the right-hand value wraps onto a second line,
+///   the continuation row leaves an empty left-hand label cell beside
+///   the wrapped value text. This exact shape is a reliable false-positive
+///   signal. Sparse 2-column tables with *legitimately* missing right-hand
+///   values (e.g. "Fax: ", "N/A" rows) are NOT rejected by this rule.
 fn is_valid_table(table: &ExtractedTable) -> bool {
     if table.rows.is_empty() || table.col_count == 0 {
         return false;
     }
+
     let total_cells = table.rows.len() * table.col_count;
     let empty_cells = table
         .rows
@@ -162,10 +173,28 @@ fn is_valid_table(table: &ExtractedTable) -> bool {
         .count();
     let empty_ratio = empty_cells as f32 / total_cells.max(1) as f32;
 
-    // Reject tables with >60% empty cells
     if empty_ratio > 0.6 {
         return false;
     }
+
+    // Narrow false-positive signature: a 2-column "table" emitted from
+    // label/value rows with faint cell backgrounds, where the right-hand
+    // value wraps onto a continuation line. The continuation row has an
+    // empty left label cell next to a non-empty right value cell. Reject
+    // only this specific shape so legitimate sparse 2-column tables
+    // (missing values on the right, blank section headers, etc.) still
+    // validate.
+    if table.col_count == 2 {
+        let has_continuation_row = table.rows.iter().any(|r| {
+            r.cells.len() == 2
+                && r.cells[0].text.trim().is_empty()
+                && !r.cells[1].text.trim().is_empty()
+        });
+        if has_continuation_row {
+            return false;
+        }
+    }
+
     true
 }
 
@@ -4165,6 +4194,144 @@ mod tests {
             bbox: None,
         };
         assert!(is_valid_table(&table), "Well-populated table should pass validation");
+    }
+
+    /// Product data sheets have label/value rows that look like 2-column
+    /// tables to the spatial detector (key text on the left, value on
+    /// the right, with faint cell backgrounds). When the right-hand
+    /// value wraps, the detector emits a continuation row whose left
+    /// cell is empty — the hallmark of this false positive. Such tables
+    /// must be rejected so their rows remain in the flow text.
+    #[test]
+    fn test_narrow_shallow_table_rejected_as_false_positive() {
+        use crate::structure::table_extractor::{ExtractedTable, TableCell, TableRow};
+        let col_count = 2;
+        let rows_data: Vec<(&str, &str)> = vec![
+            ("Temperature resistance", "adhered to aluminium, -56° C to +82° C"),
+            (
+                "Resistance to cleaning agents",
+                "adhered to aluminium, 8 h in solution (0.5% household",
+            ),
+            // Wrapping continuation → empty left cell.
+            ("", "cleaning agents) at room temperature and 65° C, no"),
+        ];
+        let mut rows = Vec::new();
+        for (label, value) in &rows_data {
+            let mut row = TableRow::new(false);
+            row.cells.push(TableCell {
+                text: label.to_string(),
+                colspan: 1,
+                rowspan: 1,
+                mcids: vec![],
+                bbox: None,
+                is_header: false,
+            });
+            row.cells.push(TableCell {
+                text: value.to_string(),
+                colspan: 1,
+                rowspan: 1,
+                mcids: vec![],
+                bbox: None,
+                is_header: false,
+            });
+            rows.push(row);
+        }
+        let table = ExtractedTable {
+            rows,
+            has_header: false,
+            col_count,
+            bbox: None,
+        };
+        assert!(
+            !is_valid_table(&table),
+            "Narrow 2-column 'table' with an empty continuation cell must \
+             be rejected so its rows stay in the flow text"
+        );
+    }
+
+    /// A 2-column data table with enough filled rows is a real table
+    /// and must continue to pass validation. Pins the threshold so the
+    /// narrow-table guard does not regress genuine two-column tables.
+    #[test]
+    fn test_narrow_deep_table_still_accepted() {
+        use crate::structure::table_extractor::{ExtractedTable, TableCell, TableRow};
+        let col_count = 2;
+        let mut rows = Vec::new();
+        for i in 0..6 {
+            let mut row = TableRow::new(i == 0);
+            row.cells.push(TableCell {
+                text: format!("Key {i}"),
+                colspan: 1,
+                rowspan: 1,
+                mcids: vec![],
+                bbox: None,
+                is_header: i == 0,
+            });
+            row.cells.push(TableCell {
+                text: format!("Value {i}"),
+                colspan: 1,
+                rowspan: 1,
+                mcids: vec![],
+                bbox: None,
+                is_header: i == 0,
+            });
+            rows.push(row);
+        }
+        let table = ExtractedTable {
+            rows,
+            has_header: true,
+            col_count,
+            bbox: None,
+        };
+        assert!(is_valid_table(&table), "A 2-col × 6-row data table should still be accepted");
+    }
+
+    /// A sparse 2-column table with a missing value on the right is a
+    /// legitimate pattern (key/value lists, form layouts, "N/A" rows) and
+    /// must NOT match the narrow-table false-positive signature, which
+    /// targets empty-LEFT / filled-RIGHT continuation rows specifically.
+    #[test]
+    fn test_narrow_sparse_table_with_missing_right_value_accepted() {
+        use crate::structure::table_extractor::{ExtractedTable, TableCell, TableRow};
+        let col_count = 2;
+        let rows_data: Vec<(&str, &str)> = vec![
+            ("Name", "ACME Corp"),
+            ("Registration", "12345"),
+            ("Fax", ""),
+            ("Email", "info@example.com"),
+        ];
+        let mut rows = Vec::new();
+        for (label, value) in &rows_data {
+            let mut row = TableRow::new(false);
+            row.cells.push(TableCell {
+                text: label.to_string(),
+                colspan: 1,
+                rowspan: 1,
+                mcids: vec![],
+                bbox: None,
+                is_header: false,
+            });
+            row.cells.push(TableCell {
+                text: value.to_string(),
+                colspan: 1,
+                rowspan: 1,
+                mcids: vec![],
+                bbox: None,
+                is_header: false,
+            });
+            rows.push(row);
+        }
+        let table = ExtractedTable {
+            rows,
+            has_header: false,
+            col_count,
+            bbox: None,
+        };
+        assert!(
+            is_valid_table(&table),
+            "A 2-col table with a missing right-hand value but no empty-left \
+             continuation row must still validate"
+        );
     }
 
     #[test]

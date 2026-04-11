@@ -20,16 +20,44 @@
           "ExceptionHandling": 1
         }
       },
-      "libraries": ["-lpdf_oxide"],
-      "library_dirs": [
-        "<!@(pwd)/../lib"
-      ],
-      "link_settings": {
-        "libraries": ["-lpdf_oxide"],
-        "library_dirs": [
-          "<!@(pwd)/../lib"
-        ]
-      }
+      "conditions": [
+        ["OS==\"linux\"", {
+          "libraries": [
+            "<(module_root_dir)/../lib/libpdf_oxide.a",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-lrt",
+            "-lgcc_s",
+            "-lutil"
+          ]
+        }],
+        ["OS==\"mac\"", {
+          "libraries": [
+            "<(module_root_dir)/../lib/libpdf_oxide.a",
+            "-framework", "CoreFoundation",
+            "-framework", "Security",
+            "-framework", "SystemConfiguration",
+            "-liconv",
+            "-lresolv"
+          ]
+        }],
+        ["OS==\"win\"", {
+          "libraries": [
+            "<(module_root_dir)/../lib/pdf_oxide.lib",
+            "ws2_32.lib",
+            "userenv.lib",
+            "bcrypt.lib",
+            "advapi32.lib",
+            "crypt32.lib",
+            "ntdll.lib",
+            "kernel32.lib",
+            "ole32.lib",
+            "shell32.lib",
+            "synchronization.lib"
+          ]
+        }]
+      ]
     }
   ]
 }

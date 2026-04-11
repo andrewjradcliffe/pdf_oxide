@@ -1,25 +1,23 @@
 {
   "name": "pdf-oxide",
-  "version": "0.3.24",
+  "version": "0.3.25",
   "type": "module",
-  "description": "High-performance PDF parsing and text extraction library with multi-language support",
+  "description": "High-performance PDF parsing and text extraction library — prebuilt native bindings, no build toolchain required",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "scripts": {
-    "prebuild": "npm run compile:ts",
-    "build": "npm run compile:ts && node scripts/fix-esm-imports.js && node-gyp build",
     "compile:ts": "tsc",
+    "build:ts": "npm run compile:ts && node scripts/fix-esm-imports.js",
+    "build:native": "node-gyp rebuild",
+    "build": "npm run build:ts && npm run build:native",
     "typecheck": "tsc --noEmit",
     "clean:ts": "rimraf lib/",
     "clean": "npm run clean:ts && node-gyp clean",
-    "install": "npm run build",
+    "prepack": "npm run build:ts",
     "test": "node --test tests/smoke.test.mjs"
   },
   "files": [
     "lib/",
-    "src/",
-    "binding.gyp",
-    "package.json",
     "README.md"
   ],
   "keywords": [
@@ -27,7 +25,8 @@
     "text-extraction",
     "pdf-parsing",
     "rust-ffi",
-    "native-binding"
+    "native-binding",
+    "prebuilt"
   ],
   "author": "PDF Oxide Contributors",
   "license": "MIT",
@@ -35,7 +34,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/yfedoseev/pdf_oxide.git",
-    "directory": "nodejs"
+    "directory": "js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -58,21 +57,18 @@
       "types": "./lib/errors.d.ts"
     }
   },
-  "gypfile": true,
-  "binary": {
-    "module_name": "pdf_oxide",
-    "module_path": "./build/Release/",
-    "host": "https://github.com/releases/download/",
-    "remote_path": "./v{version}/{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz",
-    "package_name": "{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz"
+  "optionalDependencies": {
+    "pdf_oxide-linux-x64-gnu": "0.3.25",
+    "pdf_oxide-linux-arm64-gnu": "0.3.25",
+    "pdf_oxide-darwin-x64": "0.3.25",
+    "pdf_oxide-darwin-arm64": "0.3.25",
+    "pdf_oxide-win32-x64-msvc": "0.3.25"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
-    "node-gyp": "^9.3.1",
+    "node-addon-api": "^8.7.0",
+    "node-gyp": "^10.2.0",
     "rimraf": "^5.0.0",
     "typescript": "^5.3.0"
-  },
-  "dependencies": {
-    "node-addon-api": "^8.7.0"
   }
 }

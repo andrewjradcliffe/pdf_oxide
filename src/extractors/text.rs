@@ -1054,12 +1054,31 @@ fn should_insert_space(
         }
     }
 
-    // Strong geometric signal alone (gap > 2× threshold)
-    // This is high confidence even without TJ signal
-    let strong_geometric_threshold = geometric_threshold * 2.0;
-    if gap_pt > strong_geometric_threshold {
+    // Strong geometric signal alone.
+    //
+    // `geometric_threshold` is already `space_width_pt * 0.5`. A gap that
+    // clears this threshold is >= 50 % of the font's own space-glyph
+    // advance, which is what pdfium (Chrome/pypdfium2) uses as the
+    // word-break heuristic in its default text-extraction path — and
+    // the reason pdf_oxide was glueing adjacent words like
+    // "atBirmingham", "LIFESCIENCESRESEARCH", "STATIONFREEDOM",
+    // "proteincrystals" before this change. The previous 2× multiplier
+    // required gaps >= 100 % of a full space glyph, which is stricter
+    // than the gaps modern tightly-kerned typesetters emit between
+    // real words (often 60-80 % of a space glyph).
+    //
+    // Intra-word kerning and letter-spacing adjustments are well below
+    // 50 % of a space glyph (typically under 5 % of font-size), so
+    // lowering this threshold does not produce false word breaks
+    // inside words. Pure digit-digit sequences are separately protected
+    // in the value/token branch below via `digit_digit_gap_ok`.
+    //
+    // See issue #326 for the corpus-wide measurement that motivated
+    // this change (NASA Apollo 11 jaccard 0.449 → target >= 0.90 vs
+    // pypdfium2 on the 60-PDF regression corpus).
+    if gap_pt > geometric_threshold {
         log::debug!(
-            "Space decision: STRONG GEOMETRIC - gap={:.2}pt > 2×{:.2}pt threshold - inserting space",
+            "Space decision: STRONG GEOMETRIC - gap={:.2}pt > {:.2}pt threshold - inserting space",
             gap_pt,
             geometric_threshold
         );
@@ -1126,11 +1145,10 @@ fn should_insert_space(
     // Per ISO 32000-1:2008 Section 9.10, when PDF doesn't encode a clear word boundary,
     // we cannot reliably recover it. Requiring consensus prevents false positives in justified text.
     log::trace!(
-        "Space decision: Insufficient consensus (TJ={}, gap={:.2}pt <= {:.2}pt, strong_threshold={:.2}pt) - no space",
+        "Space decision: Insufficient consensus (TJ={}, gap={:.2}pt <= {:.2}pt) - no space",
         tj_offset_triggered,
         gap_pt,
-        geometric_threshold,
-        strong_geometric_threshold
+        geometric_threshold
     );
     SpaceDecision::no_space(SpaceSource::NoSpace, 1.0)
 }
@@ -2997,6 +3015,45 @@ impl TextExtractor {
             let current_end_x = current.bbox.x + current.bbox.width;
             let gap = span.bbox.x - current_end_x;
 
+            // Fallback-width correction (issue #328): When the previous
+            // span's font has no explicit `/Widths` array, every glyph in
+            // that span reports the 500/550/600-thousandths-of-em fallback
+            // from `FontInfo::new`. For proportional Latin fonts whose
+            // real glyphs are narrower than that fallback (`SR` in the
+            // NASA Apollo report is a concrete example), the span's
+            // `bbox.width` is systematically inflated and `current_end_x`
+            // overshoots the actual end of the rendered text — often by
+            // enough to swallow the real inter-word gap entirely, turning
+            // the visible word boundary into a negative `gap` value and
+            // tripping merge logic that then glues the words without a
+            // space.
+            //
+            // `space_gap` is a corrected gap value used ONLY for the
+            // space-insertion decision below. The original `gap` is left
+            // unchanged so the merge-vs-column decision, the decimal-merge
+            // heuristic, and any downstream branch that reasons about the
+            // actual bbox layout still see the real layout and don't
+            // suddenly reclassify legitimate adjacent words as column
+            // boundaries. In other words: the merge still happens exactly
+            // as before on fallback-width fonts, but once we're inside the
+            // merge branch we consult a more honest gap to decide whether
+            // a space is warranted.
+            let space_gap = {
+                let prev_font = self.fonts.get(&current.font_name);
+                let reliable = prev_font.map(|f| f.has_explicit_widths()).unwrap_or(true);
+                if !reliable && current.bbox.width > 0.0 && !current.text.is_empty() {
+                    // 0.55 / 0.45 ≈ 1.22 matches the per-glyph inflation
+                    // observed on the NASA Apollo corpus (subagent analysis
+                    // in issue #328). Keeping the correction modest avoids
+                    // over-reporting gaps on fonts where 0.55 em is actually
+                    // the correct average advance.
+                    let corrected_end_x = current.bbox.x + current.bbox.width / 1.22;
+                    span.bbox.x - corrected_end_x
+                } else {
+                    gap
+                }
+            };
+
             // COLUMN BOUNDARY CHECK: Don't merge spans with large gaps
             // Use configured threshold to detect column separation
             let large_gap_indicates_column = gap > self.merging_config.column_boundary_threshold_pt;
@@ -3104,7 +3161,7 @@ impl TextExtractor {
                     let space_decision = should_insert_space(
                         &current.text,
                         &span.text,
-                        gap,
+                        space_gap,
                         current.font_size,
                         &current.font_name,
                         &self.fonts,
