@@ -1,6 +1,6 @@
 {
   "name": "pdf_oxide-linux-arm64-gnu",
-  "version": "0.3.27",
+  "version": "0.3.28",
   "description": "Prebuilt native binding for pdf-oxide on linux-arm64 (glibc)",
   "main": "pdf_oxide.linux-arm64-gnu.node",
   "files": [

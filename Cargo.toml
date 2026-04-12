@@ -4,7 +4,16 @@ exclude = ["js"]
 
 [package]
 name = "pdf_oxide"
-version = "0.3.27"
+version = "0.3.28"
+include = [
+    "src/**/*",
+    "benches/**/*",
+    "Cargo.toml",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "README.md",
+    "include/**/*",
+]
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"

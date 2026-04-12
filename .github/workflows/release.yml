@@ -1126,7 +1126,15 @@ jobs:
   # publishing machine (never on end-user machines).
   publish-npm-native:
     name: Publish to npm (pdf-oxide)
-    needs: [validate, publish-npm-platforms, create-release]
+    # Run after platform subpackages are attempted (not necessarily all
+    # succeeded — some may be blocked by npm spam detection, e.g.
+    # win32-x64-msvc in v0.3.27). The main package still publishes so
+    # users on working platforms can `npm install pdf-oxide`. Missing
+    # subpackages fail gracefully: npm treats optionalDependencies
+    # failures as warnings, and the loader throws a clear error on the
+    # unsupported platform at require() time.
+    needs: [validate, build-nodejs, create-release]
+    if: ${{ !contains(needs.validate.outputs.version, '-') && always() && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
     steps:
