@@ -1118,6 +1118,7 @@ jobs:
     name: Verify npm install (${{ matrix.os }})
     needs: [validate, publish-npm-native]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
     strategy:
       fail-fast: false
@@ -1159,6 +1160,9 @@ jobs:
           } finally {
             doc.close?.();
           }
+          // Native addon may keep the event loop alive (N-API background
+          // handles/threads). Force exit after the test passes.
+          process.exit(0);
           EOT
           node test.mjs
 
