@@ -1463,140 +1463,54 @@ namespace PdfOxide.Internal
         #endregion
 
         #region OCR API
+        // v0.3.27: replaced hallucinated P/Invoke declarations with the real
+        // FFI bridge added to src/ffi.rs. These 4 functions match the Rust
+        // OcrEngine API and the Go/Node.js bindings. When the crate is built
+        // without --features ocr (the default), each function returns
+        // ERR_UNSUPPORTED (6).
 
         /// <summary>
-        /// Creates an OCR engine with specified language.
+        /// Creates an OCR engine from ONNX model file paths.
+        /// Returns ERR_UNSUPPORTED when the native library was built without OCR support.
         /// </summary>
-        /// <param name="language">Language code (e.g., "eng", "fra", "deu").</param>
-        /// <param name="errorCode">Output parameter for error code.</param>
-        /// <returns>OCR engine handle, or null on error.</returns>
         [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial NativeHandle pdf_ocr_engine_create(
-            string language,
+        public static partial IntPtr pdf_ocr_engine_create(
+            string detModelPath,
+            string recModelPath,
+            string dictPath,
             out int errorCode);
 
         /// <summary>
-        /// Performs OCR on a page.
+        /// Frees an OCR engine handle created by pdf_ocr_engine_create.
         /// </summary>
-        /// <param name="engineHandle">The OCR engine handle.</param>
-        /// <param name="documentHandle">The document handle.</param>
-        /// <param name="pageIndex">The page index (0-based).</param>
-        /// <param name="errorCode">Output parameter for error code.</param>
-        /// <returns>OCR result handle, or null on error.</returns>
         [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial NativeHandle pdf_ocr_page(
-            NativeHandle engineHandle,
+        public static partial void pdf_ocr_engine_free(IntPtr engine);
+
+        /// <summary>
+        /// Checks whether a page would benefit from OCR (scanned image, no text layer).
+        /// </summary>
+        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static partial bool pdf_ocr_page_needs_ocr(
             NativeHandle documentHandle,
             int pageIndex,
             out int errorCode);
 
         /// <summary>
-        /// Gets the recognized text from OCR result.
+        /// Runs OCR on a page and returns the recognized text as a UTF-8 C string.
+        /// The engine parameter may be IntPtr.Zero, in which case the function returns an error.
+        /// Caller must free the returned string with FreeString().
         /// </summary>
-        /// <param name="resultHandle">The OCR result handle.</param>
-        /// <param name="errorCode">Output parameter for error code.</param>
-        /// <returns>UTF-8 null-terminated string pointer. Must be freed with FreeString().</returns>
         [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_result_get_text(
-            NativeHandle resultHandle,
+        public static partial IntPtr pdf_ocr_extract_text(
+            NativeHandle documentHandle,
+            int pageIndex,
+            IntPtr engine,
             out int errorCode);
-
-        /// <summary>
-        /// Gets the confidence score from OCR result.
-        /// </summary>
-        /// <param name="resultHandle">The OCR result handle.</param>
-        /// <returns>Confidence score (0.0-1.0).</returns>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial float pdf_ocr_result_get_confidence(NativeHandle resultHandle);
-
-        /// <summary>
-        /// Gets the number of words in OCR result.
-        /// </summary>
-        /// <param name="resultHandle">The OCR result handle.</param>
-        /// <returns>Number of words detected.</returns>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial int pdf_ocr_result_word_count(NativeHandle resultHandle);
-
-        /// <summary>
-        /// Gets word at specified index from OCR result.
-        /// </summary>
-        /// <param name="resultHandle">The OCR result handle.</param>
-        /// <param name="index">Word index (0-based).</param>
-        /// <param name="errorCode">Output parameter for error code.</param>
-        /// <returns>Word handle, or null on error.</returns>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial NativeHandle pdf_ocr_result_get_word(
-            NativeHandle resultHandle,
-            int index,
-            out int errorCode);
-
-        /// <summary>
-        /// Gets the text of an OCR word.
-        /// </summary>
-        /// <param name="wordHandle">The word handle.</param>
-        /// <param name="errorCode">Output parameter for error code.</param>
-        /// <returns>UTF-8 null-terminated string pointer. Must be freed with FreeString().</returns>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_word_get_text(
-            NativeHandle wordHandle,
-            out int errorCode);
-
-        /// <summary>
-        /// Gets the bounding box of an OCR word.
-        /// </summary>
-        /// <param name="wordHandle">The word handle.</param>
-        /// <param name="x">Output parameter for x coordinate.</param>
-        /// <param name="y">Output parameter for y coordinate.</param>
-        /// <param name="width">Output parameter for width.</param>
-        /// <param name="height">Output parameter for height.</param>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial void pdf_ocr_word_get_bounds(
-            NativeHandle wordHandle,
-            out float x,
-            out float y,
-            out float width,
-            out float height);
-
-        /// <summary>
-        /// Gets the confidence of an OCR word.
-        /// </summary>
-        /// <param name="wordHandle">The word handle.</param>
-        /// <returns>Confidence score (0.0-1.0).</returns>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial float pdf_ocr_word_get_confidence(NativeHandle wordHandle);
-
-        /// <summary>
-        /// Frees an OCR engine handle.
-        /// </summary>
-        /// <param name="handle">The engine handle to free.</param>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial void pdf_ocr_engine_free(IntPtr handle);
-
-        /// <summary>
-        /// Frees an OCR result handle.
-        /// </summary>
-        /// <param name="handle">The result handle to free.</param>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial void pdf_ocr_result_free(IntPtr handle);
-
-        /// <summary>
-        /// Frees an OCR word handle.
-        /// </summary>
-        /// <param name="handle">The word handle to free.</param>
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial void pdf_ocr_word_free(IntPtr handle);
 
         #endregion
 
@@ -3671,82 +3585,6 @@ namespace PdfOxide.Internal
 
         #endregion
 
-        #region OCR Operations (21 functions)
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_analyze_page(NativeHandle handle, int pageIndex, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_extract_text(NativeHandle handle, int pageIndex, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_get_spans(NativeHandle handle, int pageIndex, out int count, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial double pdf_ocr_average_confidence(NativeHandle handle, int pageIndex, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_extract_page_range(NativeHandle handle, int startPage, int endPage, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_analyze_range(NativeHandle handle, int startPage, int endPage, out int count, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_detect_language(NativeHandle handle, int pageIndex, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_detect_languages(NativeHandle handle, int pageIndex, out int count, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial int pdf_ocr_set_language(NativeHandle handle, [MarshalAs(UnmanagedType.LPUTF8Str)] string language, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_get_languages(out int count, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial int pdf_ocr_set_resolution(NativeHandle handle, int dpi, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial int pdf_ocr_set_preprocessing(NativeHandle handle, [MarshalAs(UnmanagedType.I1)] bool enabled, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial int pdf_ocr_set_confidence_threshold(NativeHandle handle, double threshold, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_get_config(NativeHandle handle, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial int pdf_ocr_total_words(NativeHandle handle, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial double pdf_ocr_total_confidence(NativeHandle handle, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_get_skipped_pages(NativeHandle handle, out int count, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_get_debug_info(NativeHandle handle, out int errorCode);
-
-        #endregion
-
         #region Barcode Operations (14 functions)
 
         [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
@@ -5806,41 +5644,6 @@ namespace PdfOxide.Internal
         [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         public static partial IntPtr pdf_get_rendered_image_data(NativeHandle img, out int dataLen, out int errorCode);
-
-        // --- OCR functions used by OCRManager ---
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr pdf_ocr_engine_create(float detectionThreshold, float recognitionThreshold, int maxSideLen, [MarshalAs(UnmanagedType.I1)] bool useGpu, int gpuDeviceId, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        [return: MarshalAs(UnmanagedType.I1)]
-        public static partial bool pdf_ocr_page_needs_ocr(NativeHandle handle, int pageIndex, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        [return: MarshalAs(UnmanagedType.LPUTF8Str)]
-        public static partial string pdf_ocr_recognize_page(NativeHandle handle, int pageIndex, IntPtr engine, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial float pdf_ocr_get_confidence(NativeHandle handle, int pageIndex, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        [return: MarshalAs(UnmanagedType.I1)]
-        public static partial bool pdf_ocr_set_language(IntPtr engine, [MarshalAs(UnmanagedType.LPUTF8Str)] string language, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        [return: MarshalAs(UnmanagedType.I1)]
-        public static partial bool pdf_ocr_preprocess_page(NativeHandle handle, int pageIndex, [MarshalAs(UnmanagedType.LPUTF8Str)] string preprocessingType, out int errorCode);
-
-        [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        [return: MarshalAs(UnmanagedType.LPUTF8Str)]
-        public static partial string pdf_ocr_get_engine_status(IntPtr engine, out int errorCode);
 
         // --- Cache functions used by CacheManager ---
 

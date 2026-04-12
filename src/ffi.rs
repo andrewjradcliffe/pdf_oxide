@@ -5686,3 +5686,163 @@ pub extern "C" fn pdf_oxide_search_results_to_json(
         },
     }
 }
+
+// ─── OCR ────────────────────────────────────────────────────────────────────
+
+/// Create an OCR engine from model/dictionary file paths.
+/// Returns an opaque handle (Box<OcrEngine>) that must be freed with
+/// `pdf_ocr_engine_free`. On failure returns null and sets `error_code`.
+#[no_mangle]
+pub extern "C" fn pdf_ocr_engine_create(
+    det_model_path: *const c_char,
+    rec_model_path: *const c_char,
+    dict_path: *const c_char,
+    error_code: *mut i32,
+) -> *mut std::ffi::c_void {
+    #[cfg(feature = "ocr")]
+    {
+        use crate::ocr::{OcrConfig, OcrEngine};
+
+        if det_model_path.is_null() || rec_model_path.is_null() || dict_path.is_null() {
+            set_error(error_code, ERR_INVALID_ARG);
+            return ptr::null_mut();
+        }
+        let det = match unsafe { CStr::from_ptr(det_model_path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_error(error_code, ERR_INVALID_ARG);
+                return ptr::null_mut();
+            },
+        };
+        let rec = match unsafe { CStr::from_ptr(rec_model_path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_error(error_code, ERR_INVALID_ARG);
+                return ptr::null_mut();
+            },
+        };
+        let dict = match unsafe { CStr::from_ptr(dict_path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_error(error_code, ERR_INVALID_ARG);
+                return ptr::null_mut();
+            },
+        };
+        match OcrEngine::new(det, rec, dict, OcrConfig::default()) {
+            Ok(engine) => {
+                set_error(error_code, ERR_SUCCESS);
+                Box::into_raw(Box::new(engine)) as *mut std::ffi::c_void
+            },
+            Err(_e) => {
+                set_error(error_code, ERR_INTERNAL);
+                ptr::null_mut()
+            },
+        }
+    }
+    #[cfg(not(feature = "ocr"))]
+    {
+        let _ = (det_model_path, rec_model_path, dict_path);
+        set_error(error_code, _ERR_UNSUPPORTED);
+        ptr::null_mut()
+    }
+}
+
+/// Free an OCR engine handle created by `pdf_ocr_engine_create`.
+#[no_mangle]
+pub extern "C" fn pdf_ocr_engine_free(engine: *mut std::ffi::c_void) {
+    #[cfg(feature = "ocr")]
+    {
+        use crate::ocr::OcrEngine;
+        if !engine.is_null() {
+            unsafe {
+                drop(Box::from_raw(engine as *mut OcrEngine));
+            }
+        }
+    }
+    #[cfg(not(feature = "ocr"))]
+    {
+        let _ = engine;
+    }
+}
+
+/// Check whether a page needs OCR (i.e. is scanned/hybrid).
+/// Returns false and sets `error_code` to `_ERR_UNSUPPORTED` when the `ocr`
+/// feature is disabled.
+#[no_mangle]
+pub extern "C" fn pdf_ocr_page_needs_ocr(
+    doc: *mut PdfDocument,
+    page_index: i32,
+    error_code: *mut i32,
+) -> bool {
+    #[cfg(feature = "ocr")]
+    {
+        if doc.is_null() {
+            set_error(error_code, ERR_INVALID_ARG);
+            return false;
+        }
+        let d = unsafe { &mut *doc };
+        match crate::ocr::needs_ocr(d, page_index as usize) {
+            Ok(v) => {
+                set_error(error_code, ERR_SUCCESS);
+                v
+            },
+            Err(e) => {
+                set_error(error_code, classify_error(&e));
+                false
+            },
+        }
+    }
+    #[cfg(not(feature = "ocr"))]
+    {
+        let _ = (doc, page_index);
+        set_error(error_code, _ERR_UNSUPPORTED);
+        false
+    }
+}
+
+/// Extract text from a page using OCR. `engine` may be null (will use native
+/// text extraction only). The returned C string must be freed with `free_string`.
+#[no_mangle]
+pub extern "C" fn pdf_ocr_extract_text(
+    doc: *mut PdfDocument,
+    page_index: i32,
+    engine: *const std::ffi::c_void,
+    error_code: *mut i32,
+) -> *mut c_char {
+    #[cfg(feature = "ocr")]
+    {
+        use crate::ocr::{OcrEngine, OcrExtractOptions};
+
+        if doc.is_null() {
+            set_error(error_code, ERR_INVALID_ARG);
+            return ptr::null_mut();
+        }
+        let d = unsafe { &mut *doc };
+        let ocr_engine: Option<&OcrEngine> = if engine.is_null() {
+            None
+        } else {
+            Some(unsafe { &*(engine as *const OcrEngine) })
+        };
+        match crate::ocr::extract_text_with_ocr(
+            d,
+            page_index as usize,
+            ocr_engine,
+            OcrExtractOptions::default(),
+        ) {
+            Ok(text) => {
+                set_error(error_code, ERR_SUCCESS);
+                to_c_string(&text)
+            },
+            Err(e) => {
+                set_error(error_code, classify_error(&e));
+                ptr::null_mut()
+            },
+        }
+    }
+    #[cfg(not(feature = "ocr"))]
+    {
+        let _ = (doc, page_index, engine);
+        set_error(error_code, _ERR_UNSUPPORTED);
+        ptr::null_mut()
+    }
+}
