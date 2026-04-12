@@ -367,6 +367,13 @@ extern void* pdf_document_extract_tables_in_rect(void* handle, int32_t page_inde
 extern void pdf_oxide_set_log_level(int level);
 extern int pdf_oxide_get_log_level();
 
+// OCR (v0.3.27 — FFI bridge wrapping src/ocr::OcrEngine)
+// Returns _ERR_UNSUPPORTED when the Rust crate was built without --features ocr.
+extern void* pdf_ocr_engine_create(const char* det_model_path, const char* rec_model_path, const char* dict_path, int* error_code);
+extern void pdf_ocr_engine_free(void* engine);
+extern bool pdf_ocr_page_needs_ocr(void* document, int32_t page_index, int* error_code);
+extern char* pdf_ocr_extract_text(void* document, int32_t page_index, const void* engine, int* error_code);
+
 extern void free_string(char* ptr);
 extern void free_bytes(void* ptr);
 */
@@ -1982,6 +1989,82 @@ func (doc *PdfDocument) HasXfa() bool {
 	}
 	defer doc.mu.RUnlock()
 	return bool(C.pdf_document_has_xfa(doc.handle))
+}
+
+// OcrEngine wraps the Rust OcrEngine for text recognition.
+// Requires the Rust crate to be built with --features ocr;
+// when the feature is off, NewOcrEngine returns ErrUnsupported.
+type OcrEngine struct {
+	handle unsafe.Pointer
+}
+
+// NewOcrEngine creates an OCR engine from model file paths.
+// detModelPath: DBNet++ detection model (.onnx)
+// recModelPath: SVTR recognition model (.onnx)
+// dictPath:     character dictionary (.txt)
+func NewOcrEngine(detModelPath, recModelPath, dictPath string) (*OcrEngine, error) {
+	cDet := C.CString(detModelPath)
+	cRec := C.CString(recModelPath)
+	cDict := C.CString(dictPath)
+	defer C.free(unsafe.Pointer(cDet))
+	defer C.free(unsafe.Pointer(cRec))
+	defer C.free(unsafe.Pointer(cDict))
+	var errorCode C.int
+	handle := C.pdf_ocr_engine_create(cDet, cRec, cDict, &errorCode)
+	if errorCode != 0 {
+		return nil, ffiError(errorCode)
+	}
+	if handle == nil {
+		return nil, ErrInternal
+	}
+	return &OcrEngine{handle: handle}, nil
+}
+
+// Close frees the OCR engine resources.
+func (e *OcrEngine) Close() {
+	if e.handle != nil {
+		C.pdf_ocr_engine_free(e.handle)
+		e.handle = nil
+	}
+}
+
+// NeedsOcr checks whether a page would benefit from OCR
+// (e.g. scanned image with no text layer).
+func (doc *PdfDocument) NeedsOcr(pageIndex int) (bool, error) {
+	if err := doc.acquireRead(); err != nil {
+		return false, err
+	}
+	defer doc.mu.RUnlock()
+	var errorCode C.int
+	result := bool(C.pdf_ocr_page_needs_ocr(doc.handle, C.int32_t(pageIndex), &errorCode))
+	if errorCode != 0 {
+		return false, ffiError(errorCode)
+	}
+	return result, nil
+}
+
+// ExtractTextWithOcr runs OCR on a page and returns the recognized text.
+// engine may be nil, in which case the Rust side returns an error.
+func (doc *PdfDocument) ExtractTextWithOcr(pageIndex int, engine *OcrEngine) (string, error) {
+	if err := doc.acquireRead(); err != nil {
+		return "", err
+	}
+	defer doc.mu.RUnlock()
+	var enginePtr unsafe.Pointer
+	if engine != nil {
+		enginePtr = engine.handle
+	}
+	var errorCode C.int
+	cText := C.pdf_ocr_extract_text(doc.handle, C.int32_t(pageIndex), enginePtr, &errorCode)
+	if errorCode != 0 {
+		return "", ffiError(errorCode)
+	}
+	if cText == nil {
+		return "", nil
+	}
+	text := C.GoString(cText)
+	C.free_string(cText)
+	return text, nil
 }
 
 // RemoveHeaders removes repeated headers. Returns count removed.

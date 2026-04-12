@@ -75,46 +75,8 @@ extern "C" {
     QR_ERROR_CORRECTION_H = 3
   };
 
-  // Page complexity levels
-  enum PageComplexity {
-    PAGE_COMPLEXITY_SIMPLE = 0,
-    PAGE_COMPLEXITY_MODERATE = 1,
-    PAGE_COMPLEXITY_COMPLEX = 2,
-    PAGE_COMPLEXITY_VERY_COMPLEX = 3
-  };
 
-  // Content types
-  enum ContentType {
-    CONTENT_TYPE_TEXT_ONLY = 0,
-    CONTENT_TYPE_TEXT_IMAGES = 1,
-    CONTENT_TYPE_TABLES = 2,
-    CONTENT_TYPE_MIXED_LAYOUT = 3,
-    CONTENT_TYPE_SCANNED = 4,
-    CONTENT_TYPE_FORM = 5,
-    CONTENT_TYPE_VECTOR_GRAPHICS = 6
-  };
-
-  // Structures
-  struct PdfRenderOptions {
-    int dpi;
-    ImageFormat format;
-    int jpeg_quality;
-    int webp_quality;
-    int color_space;
-    bool antialias;
-    uint32_t background_color;
-    int max_width;
-    int max_height;
-    bool apply_color_profile;
-  };
-
-  struct PdfOcrConfig {
-    float detection_threshold;
-    float recognition_threshold;
-    int max_side_len;
-    bool use_gpu;
-    int gpu_device_id;
-  };
+  // (No C-side structs needed — the real Rust FFI uses opaque handles)
 
   // Logging
   extern void pdf_oxide_set_log_level(int level);
@@ -137,39 +99,27 @@ extern "C" {
   extern void* pdf_document_search_all(void* handle, const char* text, int case_sensitive, int* error_code);
   extern void* pdf_document_get_embedded_fonts(void* handle, int32_t page_index, int* error_code);
   extern void* pdf_document_get_embedded_images(void* handle, int32_t page_index, int* error_code);
-  extern void* pdf_document_get_annotations(void* handle, int32_t page_index, int* error_code);
+  extern void* pdf_document_get_page_annotations(void* handle, int32_t page_index, int* error_code);
 
-  // Rendering Operations
-  extern PdfRenderOptions pdf_render_options_default();
-  extern void* pdf_page_renderer_create(const PdfRenderOptions* options, int* error_code);
-  extern void pdf_page_renderer_free(void* renderer);
-  extern void* pdf_render_page(const void* document, int page_index, const void* renderer, int* error_code);
-  extern bool pdf_render_page_to_file(const void* document, int page_index, const char* file_path, const PdfRenderOptions* options, int* error_code);
-  extern void* pdf_render_page_thumbnail(const void* document, int page_index, int thumbnail_size, int* error_code);
-  extern int pdf_rendered_image_width(const void* image);
-  extern int pdf_rendered_image_height(const void* image);
-  extern size_t pdf_rendered_image_size(const void* image);
-  extern const uint8_t* pdf_rendered_image_data(const void* image);
-  extern bool pdf_rendered_image_save(const void* image, const char* file_path, int* error_code);
-  extern char* pdf_rendered_image_to_base64(const void* image, bool with_mime_prefix, int* error_code);
+  // Rendering Operations (real Rust FFI signatures)
+  extern void* pdf_render_page(void* document, int32_t page_index, int32_t format, int* error_code);
+  extern void* pdf_render_page_thumbnail(void* document, int32_t page_index, int32_t size, int32_t format, int* error_code);
+  extern int pdf_get_rendered_image_width(const void* image, int* error_code);
+  extern int pdf_get_rendered_image_height(const void* image, int* error_code);
   extern void pdf_rendered_image_free(void* image);
 
-  // OCR Operations
-  extern void* pdf_ocr_engine_create(const PdfOcrConfig* config, int* error_code);
+  // OCR Operations (real Rust FFI signatures)
+  extern void* pdf_ocr_engine_create(const char* det_model_path, const char* rec_model_path, const char* dict_path, int* error_code);
   extern void pdf_ocr_engine_free(void* engine);
-  extern bool pdf_ocr_page_needs_ocr(const void* document, int page_index, int* error_code);
-  extern void* pdf_ocr_recognize_page(const void* document, int page_index, const void* engine, int* error_code);
-  extern char* pdf_ocr_extract_text(const void* document, int page_index, const void* engine, bool force_ocr, int* error_code);
-  extern char* pdf_ocr_results_get_text(const void* results, int* error_code);
-  extern float pdf_ocr_results_average_confidence(const void* results);
-  extern void pdf_ocr_results_free(void* results);
+  extern bool pdf_ocr_page_needs_ocr(void* document, int32_t page_index, int* error_code);
+  extern char* pdf_ocr_extract_text(void* document, int32_t page_index, const void* engine, int* error_code);
 
-  // Compliance Operations
-  extern void* pdf_validate_pdf_a(const void* document, PdfALevel level, int* error_code);
+  // Compliance Operations (real Rust FFI signatures)
+  extern void* pdf_validate_pdf_a_level(const void* document, int32_t level, int* error_code);
   extern bool pdf_pdf_a_is_compliant(const void* results);
   extern int pdf_pdf_a_error_count(const void* results);
   extern int pdf_pdf_a_warning_count(const void* results);
-  extern char* pdf_pdf_a_get_report(const void* results, int* error_code);
+  extern char* pdf_pdf_a_get_error(const void* results, int32_t index, int* error_code);
   extern void pdf_pdf_a_results_free(void* results);
   extern void* pdf_validate_pdf_x(const void* document, PdfXLevel level, int* error_code);
   extern bool pdf_pdf_x_is_compliant(const void* results);
@@ -222,30 +172,10 @@ extern "C" {
   extern void pdf_barcode_free(void* barcode);
   extern bool pdf_add_barcode_to_page(void* document, int page_num, const void* barcode, float x, float y, float width, float height, int* error_code);
 
-  // XFA Operations
+  // XFA Operations (only the real ones that exist in Rust FFI)
   extern bool pdf_document_has_xfa(const void* document, int* error_code);
-  extern void* pdf_parse_xfa_form(const void* document, int* error_code);
-  extern void pdf_xfa_form_free(void* form);
-  extern int pdf_xfa_form_field_count(const void* form, int* error_code);
-  extern void* pdf_xfa_form_get_field(const void* form, int index, int* error_code);
-  extern char* pdf_xfa_field_get_name(const void* field, int* error_code);
-  extern void pdf_xfa_field_free(void* field);
   extern bool pdf_convert_xfa_to_acroform(void* document, int* error_code);
 
-  // Hybrid ML Operations
-  extern void* pdf_analyze_page(const void* document, int page_index, int* error_code);
-  extern PageComplexity pdf_analysis_get_complexity(const void* result);
-  extern float pdf_analysis_get_complexity_score(const void* result);
-  extern ContentType pdf_analysis_get_content_type(const void* result);
-  extern float pdf_analysis_get_text_density(const void* result);
-  extern float pdf_analysis_get_image_density(const void* result);
-  extern void pdf_analysis_result_free(void* result);
-  extern void* pdf_create_extraction_strategy(const void* document, int page_index, int* error_code);
-  extern char* pdf_strategy_get_description(const void* strategy, int* error_code);
-  extern bool pdf_strategy_recommends_ocr(const void* strategy);
-  extern void pdf_strategy_free(void* strategy);
-  extern char* pdf_ml_get_status(int* error_code);
-  extern bool pdf_ml_model_available(const char* model_name);
 
   // Document Editor Operations
   extern void* document_editor_open(const char* path, int* error_code);
@@ -781,56 +711,20 @@ Napi::Value SearchResultFree(const Napi::CallbackInfo& info) {
 // Rendering Operations
 // ============================================================
 
-Napi::Value CreateRenderer(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  PdfRenderOptions options = pdf_render_options_default();
-
-  if (info.Length() > 0 && info[0].IsObject()) {
-    Napi::Object opts = info[0].As<Napi::Object>();
-
-    if (opts.Has("dpi")) options.dpi = opts.Get("dpi").As<Napi::Number>().Int32Value();
-    if (opts.Has("format")) options.format = (ImageFormat)opts.Get("format").As<Napi::Number>().Int32Value();
-    if (opts.Has("jpegQuality")) options.jpeg_quality = opts.Get("jpegQuality").As<Napi::Number>().Int32Value();
-    if (opts.Has("antialias")) options.antialias = opts.Get("antialias").As<Napi::Boolean>().Value();
-  }
-
-  int errorCode = 0;
-  void* renderer = pdf_page_renderer_create(&options, &errorCode);
-
-  if (errorCode != 0 || !renderer) {
-    throw Napi::Error::New(env, "Failed to create renderer: " + getErrorMessage(errorCode));
-  }
-
-  return Napi::External<void>::New(env, renderer);
-}
-
-Napi::Value FreeRenderer(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsExternal()) {
-    throw Napi::TypeError::New(env, "renderer must be an external pointer");
-  }
-
-  void* renderer = info[0].As<Napi::External<void>>().Data();
-  pdf_page_renderer_free(renderer);
-
-  return env.Undefined();
-}
-
 Napi::Value RenderPage(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  if (info.Length() < 3 || !info[0].IsExternal() || !info[1].IsNumber() || !info[2].IsExternal()) {
-    throw Napi::TypeError::New(env, "invalid arguments: (document, pageIndex, renderer)");
+  if (info.Length() < 2 || !info[0].IsExternal() || !info[1].IsNumber()) {
+    throw Napi::TypeError::New(env, "invalid arguments: (document, pageIndex, [format])");
   }
 
   void* document = info[0].As<Napi::External<void>>().Data();
-  int pageIndex = info[1].As<Napi::Number>().Int32Value();
-  void* renderer = info[2].As<Napi::External<void>>().Data();
+  int32_t pageIndex = info[1].As<Napi::Number>().Int32Value();
+  // format: 0=PNG (default), 1=JPEG
+  int32_t format = (info.Length() > 2 && info[2].IsNumber()) ? info[2].As<Napi::Number>().Int32Value() : 0;
   int errorCode = 0;
 
-  void* image = pdf_render_page(document, pageIndex, renderer, &errorCode);
+  void* image = pdf_render_page(document, pageIndex, format, &errorCode);
 
   if (errorCode != 0 || !image) {
     throw Napi::Error::New(env, "Failed to render page: " + getErrorMessage(errorCode));
@@ -843,44 +737,22 @@ Napi::Value RenderThumbnail(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 3 || !info[0].IsExternal() || !info[1].IsNumber() || !info[2].IsNumber()) {
-    throw Napi::TypeError::New(env, "invalid arguments: (document, pageIndex, size)");
+    throw Napi::TypeError::New(env, "invalid arguments: (document, pageIndex, size, [format])");
   }
 
   void* document = info[0].As<Napi::External<void>>().Data();
-  int pageIndex = info[1].As<Napi::Number>().Int32Value();
-  int size = info[2].As<Napi::Number>().Int32Value();
+  int32_t pageIndex = info[1].As<Napi::Number>().Int32Value();
+  int32_t size = info[2].As<Napi::Number>().Int32Value();
+  int32_t format = (info.Length() > 3 && info[3].IsNumber()) ? info[3].As<Napi::Number>().Int32Value() : 0;
   int errorCode = 0;
 
-  void* image = pdf_render_page_thumbnail(document, pageIndex, size, &errorCode);
+  void* image = pdf_render_page_thumbnail(document, pageIndex, size, format, &errorCode);
 
   if (errorCode != 0 || !image) {
     throw Napi::Error::New(env, "Failed to render thumbnail: " + getErrorMessage(errorCode));
   }
 
   return Napi::External<void>::New(env, image);
-}
-
-Napi::Value RenderedImageToBase64(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 2 || !info[0].IsExternal() || !info[1].IsBoolean()) {
-    throw Napi::TypeError::New(env, "invalid arguments: (image, withMimePrefix)");
-  }
-
-  void* image = info[0].As<Napi::External<void>>().Data();
-  bool withMimePrefix = info[1].As<Napi::Boolean>().Value();
-  int errorCode = 0;
-
-  char* base64 = pdf_rendered_image_to_base64(image, withMimePrefix, &errorCode);
-
-  if (errorCode != 0 || !base64) {
-    throw Napi::Error::New(env, "Failed to convert to base64: " + getErrorMessage(errorCode));
-  }
-
-  std::string result(base64);
-  free_string(base64);
-
-  return Napi::String::New(env, result);
 }
 
 Napi::Value FreeRenderedImage(const Napi::CallbackInfo& info) {
@@ -903,26 +775,16 @@ Napi::Value FreeRenderedImage(const Napi::CallbackInfo& info) {
 Napi::Value CreateOCREngine(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  PdfOcrConfig config = {
-    .detection_threshold = 0.5f,
-    .recognition_threshold = 0.5f,
-    .max_side_len = 960,
-    .use_gpu = false,
-    .gpu_device_id = 0
-  };
-
-  if (info.Length() > 0 && info[0].IsObject()) {
-    Napi::Object opts = info[0].As<Napi::Object>();
-
-    if (opts.Has("detectionThreshold")) config.detection_threshold = opts.Get("detectionThreshold").As<Napi::Number>().FloatValue();
-    if (opts.Has("recognitionThreshold")) config.recognition_threshold = opts.Get("recognitionThreshold").As<Napi::Number>().FloatValue();
-    if (opts.Has("maxSideLen")) config.max_side_len = opts.Get("maxSideLen").As<Napi::Number>().Int32Value();
-    if (opts.Has("useGpu")) config.use_gpu = opts.Get("useGpu").As<Napi::Boolean>().Value();
-    if (opts.Has("gpuDeviceId")) config.gpu_device_id = opts.Get("gpuDeviceId").As<Napi::Number>().Int32Value();
+  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString()) {
+    throw Napi::TypeError::New(env, "invalid arguments: (detModelPath, recModelPath, dictPath)");
   }
 
+  std::string detModelPath = info[0].As<Napi::String>().Utf8Value();
+  std::string recModelPath = info[1].As<Napi::String>().Utf8Value();
+  std::string dictPath = info[2].As<Napi::String>().Utf8Value();
   int errorCode = 0;
-  void* engine = pdf_ocr_engine_create(&config, &errorCode);
+
+  void* engine = pdf_ocr_engine_create(detModelPath.c_str(), recModelPath.c_str(), dictPath.c_str(), &errorCode);
 
   if (errorCode != 0 || !engine) {
     throw Napi::Error::New(env, "Failed to create OCR engine: " + getErrorMessage(errorCode));
@@ -967,18 +829,16 @@ Napi::Value PageNeedsOCR(const Napi::CallbackInfo& info) {
 Napi::Value OCRExtractText(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  if (info.Length() < 4 || !info[0].IsExternal() || !info[1].IsNumber() ||
-      !info[2].IsExternal() || !info[3].IsBoolean()) {
-    throw Napi::TypeError::New(env, "invalid arguments: (document, pageIndex, engine, forceOCR)");
+  if (info.Length() < 3 || !info[0].IsExternal() || !info[1].IsNumber() || !info[2].IsExternal()) {
+    throw Napi::TypeError::New(env, "invalid arguments: (document, pageIndex, engine)");
   }
 
   void* document = info[0].As<Napi::External<void>>().Data();
-  int pageIndex = info[1].As<Napi::Number>().Int32Value();
+  int32_t pageIndex = info[1].As<Napi::Number>().Int32Value();
   void* engine = info[2].As<Napi::External<void>>().Data();
-  bool forceOCR = info[3].As<Napi::Boolean>().Value();
   int errorCode = 0;
 
-  char* text = pdf_ocr_extract_text(document, pageIndex, engine, forceOCR, &errorCode);
+  char* text = pdf_ocr_extract_text(document, pageIndex, engine, &errorCode);
 
   if (errorCode != 0 || !text) {
     throw Napi::Error::New(env, "OCR extraction failed: " + getErrorMessage(errorCode));
@@ -1002,10 +862,10 @@ Napi::Value ValidatePdfA(const Napi::CallbackInfo& info) {
   }
 
   void* document = info[0].As<Napi::External<void>>().Data();
-  PdfALevel level = (PdfALevel)info[1].As<Napi::Number>().Int32Value();
+  int32_t level = info[1].As<Napi::Number>().Int32Value();
   int errorCode = 0;
 
-  void* results = pdf_validate_pdf_a(document, level, &errorCode);
+  void* results = pdf_validate_pdf_a_level(document, level, &errorCode);
 
   if (errorCode != 0 || !results) {
     throw Napi::Error::New(env, "PDF/A validation failed: " + getErrorMessage(errorCode));
@@ -1035,18 +895,42 @@ Napi::Value PdfAGetReport(const Napi::CallbackInfo& info) {
   }
 
   void* results = info[0].As<Napi::External<void>>().Data();
-  int errorCode = 0;
+  int ec = 0;
 
-  char* report = pdf_pdf_a_get_report(results, &errorCode);
+  // Build a JSON report by iterating errors and warnings from the real FFI
+  bool compliant = pdf_pdf_a_is_compliant(results);
+  int errCount = pdf_pdf_a_error_count(results);
+  int warnCount = pdf_pdf_a_warning_count(results);
 
-  if (errorCode != 0 || !report) {
-    throw Napi::Error::New(env, "Failed to get report: " + getErrorMessage(errorCode));
+  // Construct a JSON string: {"compliant":bool,"errors":[...],"warnings":[...]}
+  std::string json = "{\"compliant\":";
+  json += compliant ? "true" : "false";
+  json += ",\"errors\":[";
+  for (int i = 0; i < errCount; i++) {
+    char* msg = pdf_pdf_a_get_error(results, i, &ec);
+    if (i > 0) json += ",";
+    if (msg) {
+      // Escape double quotes in the message
+      std::string escaped;
+      for (const char* p = msg; *p; ++p) {
+        if (*p == '"') escaped += "\\\"";
+        else if (*p == '\\') escaped += "\\\\";
+        else if (*p == '\n') escaped += "\\n";
+        else escaped += *p;
+      }
+      json += "\"" + escaped + "\"";
+      free_string(msg);
+    } else {
+      json += "null";
+    }
   }
+  json += "],\"warnings\":[";
+  // pdf_pdf_a_get_warning is not in the real FFI, so just report count
+  json += "],\"warningCount\":";
+  json += std::to_string(warnCount);
+  json += "}";
 
-  std::string result(report);
-  free_string(report);
-
-  return Napi::String::New(env, result);
+  return Napi::String::New(env, json);
 }
 
 Napi::Value FreePdfAResults(const Napi::CallbackInfo& info) {
@@ -1240,142 +1124,7 @@ Napi::Value HasXFA(const Napi::CallbackInfo& info) {
   return Napi::Boolean::New(env, hasXFA);
 }
 
-Napi::Value ParseXFAForm(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
 
-  if (info.Length() < 1 || !info[0].IsExternal()) {
-    throw Napi::TypeError::New(env, "document must be an external pointer");
-  }
-
-  void* document = info[0].As<Napi::External<void>>().Data();
-  int errorCode = 0;
-
-  void* form = pdf_parse_xfa_form(document, &errorCode);
-
-  if (errorCode != 0 || !form) {
-    throw Napi::Error::New(env, "Failed to parse XFA form: " + getErrorMessage(errorCode));
-  }
-
-  return Napi::External<void>::New(env, form);
-}
-
-Napi::Value FreeXFAForm(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsExternal()) {
-    throw Napi::TypeError::New(env, "form must be an external pointer");
-  }
-
-  void* form = info[0].As<Napi::External<void>>().Data();
-  pdf_xfa_form_free(form);
-
-  return env.Undefined();
-}
-
-// ============================================================
-// Hybrid ML Operations
-// ============================================================
-
-Napi::Value AnalyzePage(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 2 || !info[0].IsExternal() || !info[1].IsNumber()) {
-    throw Napi::TypeError::New(env, "invalid arguments: (document, pageIndex)");
-  }
-
-  void* document = info[0].As<Napi::External<void>>().Data();
-  int pageIndex = info[1].As<Napi::Number>().Int32Value();
-  int errorCode = 0;
-
-  void* result = pdf_analyze_page(document, pageIndex, &errorCode);
-
-  if (errorCode != 0 || !result) {
-    throw Napi::Error::New(env, "Page analysis failed: " + getErrorMessage(errorCode));
-  }
-
-  return Napi::External<void>::New(env, result);
-}
-
-Napi::Value AnalysisGetComplexity(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsExternal()) {
-    throw Napi::TypeError::New(env, "result must be an external pointer");
-  }
-
-  void* result = info[0].As<Napi::External<void>>().Data();
-  PageComplexity complexity = pdf_analysis_get_complexity(result);
-
-  return Napi::Number::New(env, (int)complexity);
-}
-
-Napi::Value AnalysisGetComplexityScore(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsExternal()) {
-    throw Napi::TypeError::New(env, "result must be an external pointer");
-  }
-
-  void* result = info[0].As<Napi::External<void>>().Data();
-  float score = pdf_analysis_get_complexity_score(result);
-
-  return Napi::Number::New(env, score);
-}
-
-Napi::Value AnalysisGetContentType(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsExternal()) {
-    throw Napi::TypeError::New(env, "result must be an external pointer");
-  }
-
-  void* result = info[0].As<Napi::External<void>>().Data();
-  ContentType contentType = pdf_analysis_get_content_type(result);
-
-  return Napi::Number::New(env, (int)contentType);
-}
-
-Napi::Value FreeAnalysisResult(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsExternal()) {
-    throw Napi::TypeError::New(env, "result must be an external pointer");
-  }
-
-  void* result = info[0].As<Napi::External<void>>().Data();
-  pdf_analysis_result_free(result);
-
-  return env.Undefined();
-}
-
-Napi::Value MLGetStatus(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  int errorCode = 0;
-
-  char* status = pdf_ml_get_status(&errorCode);
-
-  if (errorCode != 0 || !status) {
-    throw Napi::Error::New(env, "Failed to get ML status: " + getErrorMessage(errorCode));
-  }
-
-  std::string result(status);
-  free_string(status);
-
-  return Napi::String::New(env, result);
-}
-
-Napi::Value MLModelAvailable(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsString()) {
-    throw Napi::TypeError::New(env, "modelName must be a string");
-  }
-
-  std::string modelName = info[0].As<Napi::String>().Utf8Value();
-  bool available = pdf_ml_model_available(modelName.c_str());
-
-  return Napi::Boolean::New(env, available);
-}
 
 // ============================================================
 // Document Editor Operations
@@ -1794,7 +1543,7 @@ Napi::Value GetAnnotationsDetailed(const Napi::CallbackInfo& info) {
   void* handle = info[0].As<Napi::External<void>>().Data();
   int32_t pageIndex = info[1].As<Napi::Number>().Int32Value();
   int errorCode = 0;
-  void* annotations = pdf_document_get_annotations(handle, pageIndex, &errorCode);
+  void* annotations = pdf_document_get_page_annotations(handle, pageIndex, &errorCode);
   if (errorCode != 0) throw Napi::Error::New(env, getErrorMessage(errorCode));
   if (!annotations) return Napi::Array::New(env, 0);
 
@@ -1858,7 +1607,7 @@ Napi::Value RenderPageZoom(const Napi::CallbackInfo& info) {
   return Napi::External<void>::New(env, image);
 }
 
-Napi::Value RenderPageToFile(const Napi::CallbackInfo& info) {
+Napi::Value SaveRenderedImage(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   void* image = info[0].As<Napi::External<void>>().Data();
   std::string path = info[1].As<Napi::String>().Utf8Value();
@@ -1871,13 +1620,19 @@ Napi::Value RenderPageToFile(const Napi::CallbackInfo& info) {
 Napi::Value RenderedImageWidth(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   void* image = info[0].As<Napi::External<void>>().Data();
-  return Napi::Number::New(env, pdf_rendered_image_width(image));
+  int errorCode = 0;
+  int width = pdf_get_rendered_image_width(image, &errorCode);
+  if (errorCode != 0) throw Napi::Error::New(env, "Failed to get image width: " + getErrorMessage(errorCode));
+  return Napi::Number::New(env, width);
 }
 
 Napi::Value RenderedImageHeight(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   void* image = info[0].As<Napi::External<void>>().Data();
-  return Napi::Number::New(env, pdf_rendered_image_height(image));
+  int errorCode = 0;
+  int height = pdf_get_rendered_image_height(image, &errorCode);
+  if (errorCode != 0) throw Napi::Error::New(env, "Failed to get image height: " + getErrorMessage(errorCode));
+  return Napi::Number::New(env, height);
 }
 
 // ============================================================
@@ -3064,11 +2819,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("searchResultFree", Napi::Function::New(env, SearchResultFree));
 
   // Rendering Operations
-  exports.Set("createRenderer", Napi::Function::New(env, CreateRenderer));
-  exports.Set("freeRenderer", Napi::Function::New(env, FreeRenderer));
   exports.Set("renderPage", Napi::Function::New(env, RenderPage));
   exports.Set("renderThumbnail", Napi::Function::New(env, RenderThumbnail));
-  exports.Set("renderedImageToBase64", Napi::Function::New(env, RenderedImageToBase64));
   exports.Set("freeRenderedImage", Napi::Function::New(env, FreeRenderedImage));
 
   // OCR Operations
@@ -3094,7 +2846,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   // Rendering variants
   exports.Set("estimateRenderTime", Napi::Function::New(env, EstimateRenderTime));
   exports.Set("renderPageZoom", Napi::Function::New(env, RenderPageZoom));
-  exports.Set("renderPageToFile", Napi::Function::New(env, RenderPageToFile));
+  exports.Set("saveRenderedImage", Napi::Function::New(env, SaveRenderedImage));
   exports.Set("renderedImageWidth", Napi::Function::New(env, RenderedImageWidth));
   exports.Set("renderedImageHeight", Napi::Function::New(env, RenderedImageHeight));
 
@@ -3226,17 +2978,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 
   // XFA Operations
   exports.Set("hasXFA", Napi::Function::New(env, HasXFA));
-  exports.Set("parseXFAForm", Napi::Function::New(env, ParseXFAForm));
-  exports.Set("freeXFAForm", Napi::Function::New(env, FreeXFAForm));
 
-  // Hybrid ML Operations
-  exports.Set("analyzePage", Napi::Function::New(env, AnalyzePage));
-  exports.Set("analysisGetComplexity", Napi::Function::New(env, AnalysisGetComplexity));
-  exports.Set("analysisGetComplexityScore", Napi::Function::New(env, AnalysisGetComplexityScore));
-  exports.Set("analysisGetContentType", Napi::Function::New(env, AnalysisGetContentType));
-  exports.Set("freeAnalysisResult", Napi::Function::New(env, FreeAnalysisResult));
-  exports.Set("mlGetStatus", Napi::Function::New(env, MLGetStatus));
-  exports.Set("mlModelAvailable", Napi::Function::New(env, MLModelAvailable));
 
   return exports;
 }

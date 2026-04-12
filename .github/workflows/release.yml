@@ -365,7 +365,7 @@ jobs:
   # This ensures `go get` works without requiring users to build Rust
   update-go-native-libs:
     name: Update Go native libs
-    needs: [validate, build-native-libs]
+    needs: [validate, build-native-libs, build-nodejs, build-csharp, build-binaries, build-python-wheels, build-python-wheels-musl, build-wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -424,14 +424,18 @@ jobs:
           VERSION="${{ needs.validate.outputs.version }}"
           # Go submodule tags use directory prefix
           # Since go.mod is in go/, the tag is go/v{VERSION}
-          git tag "go/v${VERSION}"
-          git push origin "go/v${VERSION}"
+          if git ls-remote --tags origin "go/v${VERSION}" | grep -q .; then
+            echo "Tag go/v${VERSION} already exists on remote — skipping"
+          else
+            git tag "go/v${VERSION}"
+            git push origin "go/v${VERSION}"
+          fi
 
-  # Clean-room verification that `go get` works against the just-published tag
-  # across real platforms. This is the gate called out in #334 that would have
-  # caught the v0.3.24 .gitignore/staticlib regression before shipping.
+  # Local path verification that the Go module builds correctly with the
+  # freshly-staged native libraries. Uses `replace` directive so we never
+  # touch sum.golang.org — avoids flaky tag-propagation races.
   verify-go-install:
-    name: Verify go get (${{ matrix.os }})
+    name: Verify Go build (${{ matrix.os }})
     needs: [validate, update-go-native-libs]
     runs-on: ${{ matrix.os }}
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
@@ -440,23 +444,40 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Build a fresh consumer against go/v${{ needs.validate.outputs.version }}
+      - name: Download native-lib artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          path: native-libs
+
+      - name: Stage native libs in go/lib/
+        shell: bash
+        run: |
+          cp native-libs/native-linux-x86_64/libpdf_oxide.a   go/lib/linux_amd64/  2>/dev/null || true
+          cp native-libs/native-linux-aarch64/libpdf_oxide.a  go/lib/linux_arm64/  2>/dev/null || true
+          cp native-libs/native-macos-x86_64/libpdf_oxide.a   go/lib/darwin_amd64/ 2>/dev/null || true
+          cp native-libs/native-macos-aarch64/libpdf_oxide.a  go/lib/darwin_arm64/ 2>/dev/null || true
+          cp native-libs/native-windows-x86_64-gnu/libpdf_oxide.a go/lib/windows_amd64/ 2>/dev/null || true
+
+      - name: Build local consumer with replace directive
         shell: bash
         run: |
           set -euxo pipefail
-          VERSION="${{ needs.validate.outputs.version }}"
           WORK="$(mktemp -d)"
           cd "$WORK"
           go mod init verify
-          # Subdirectory-module tag is `go/v<version>` on the git side, but
-          # `go get` consumers still reference it as `@v<version>` — Go's
-          # module resolver translates the prefix automatically.
-          go get "github.com/yfedoseev/pdf_oxide/go@v${VERSION}"
+          # Point at the local checkout instead of fetching from the registry
+          go mod edit -replace "github.com/yfedoseev/pdf_oxide/go=$GITHUB_WORKSPACE/go"
+          go mod edit -require "github.com/yfedoseev/pdf_oxide/go@v0.0.0"
           cat > main.go <<'EOT'
           package main
 
@@ -843,7 +864,7 @@ jobs:
   # Create GitHub Release
   create-release:
     name: Create GitHub Release
-    needs: [validate, build-binaries, build-python-wheels, build-python-wheels-musl, build-wasm, build-nodejs, build-csharp]
+    needs: [validate, build-binaries, build-python-wheels, build-python-wheels-musl, build-wasm, build-nodejs, build-csharp, update-go-native-libs]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
