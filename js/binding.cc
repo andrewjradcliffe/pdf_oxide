@@ -326,6 +326,8 @@ extern "C" {
   // Saving
   extern int pdf_save(void* handle, const char* path, int* error_code);
   extern uint8_t* pdf_save_to_bytes(void* handle, int32_t* data_len, int* error_code);
+  extern void pdf_free(void* handle);
+  extern int32_t pdf_get_page_count(void* handle, int* error_code);
 
   // Rendering (additional)
   extern void* pdf_create_renderer(int dpi, int format, int quality, bool anti_alias, int* error_code);
@@ -2909,9 +2911,24 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("pdfFromText", Napi::Function::New(env, PdfFromText));
   exports.Set("pdfMerge", Napi::Function::New(env, PdfMerge));
 
-  // Saving
+  // Saving + lifecycle
   exports.Set("pdfSave", Napi::Function::New(env, PdfSave));
   exports.Set("pdfSaveToBytes", Napi::Function::New(env, PdfSaveToBytes));
+  exports.Set("pdfFree", Napi::Function::New(env, [](const Napi::CallbackInfo& info) -> Napi::Value {
+    void* handle = info[0].As<Napi::External<void>>().Data();
+    if (handle) pdf_free(handle);
+    return info.Env().Undefined();
+  }));
+  exports.Set("pdfGetPageCount", Napi::Function::New(env, [](const Napi::CallbackInfo& info) -> Napi::Value {
+    void* handle = info[0].As<Napi::External<void>>().Data();
+    int errorCode = 0;
+    int32_t count = pdf_get_page_count(handle, &errorCode);
+    if (errorCode != 0) {
+      Napi::Error::New(info.Env(), "Failed to get page count").ThrowAsJavaScriptException();
+      return info.Env().Undefined();
+    }
+    return Napi::Number::New(info.Env(), count);
+  }));
 
   // Rendering (additional)
   exports.Set("pdfCreateRenderer", Napi::Function::New(env, PdfCreateRenderer));

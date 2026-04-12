@@ -117,46 +117,48 @@ const {
 const { OcrLanguage: OCRLanguage } = require('../lib/managers/ocr-manager.js') as any;
 
 /**
- * Platform-specific native module packages
+ * Platform-specific prebuild paths (relative to compiled lib/index.js).
+ * At runtime lib/index.js lives at js/lib/index.js, so ../prebuilds/
+ * resolves to js/prebuilds/.
  */
 const PLATFORMS: Record<string, Record<string, string>> = {
   'darwin': {
-    'x64': 'pdf_oxide-darwin-x64',
-    'arm64': 'pdf_oxide-darwin-arm64',
+    'x64': '../prebuilds/darwin-x64/pdf_oxide.node',
+    'arm64': '../prebuilds/darwin-arm64/pdf_oxide.node',
   },
   'linux': {
-    'x64': 'pdf_oxide-linux-x64-gnu',
-    'arm64': 'pdf_oxide-linux-arm64-gnu',
+    'x64': '../prebuilds/linux-x64/pdf_oxide.node',
+    'arm64': '../prebuilds/linux-arm64/pdf_oxide.node',
   },
   'win32': {
-    'x64': 'pdf_oxide-win32-x64-msvc',
-    'arm64': 'pdf_oxide-win32-arm64-msvc',
+    'x64': '../prebuilds/win32-x64/pdf_oxide.node',
   },
 };
 
 /**
- * Gets the native package name for the current platform and architecture
- * @returns Native package name
+ * Gets the prebuild path for the current platform and architecture
+ * @returns Path to the prebuild .node file (relative to lib/index.js)
  * @throws Error if platform or architecture is not supported
  */
-function getNativePackageName(): string {
-  const osPackages = PLATFORMS[platform];
-  if (!osPackages) {
+function getPrebuildPath(): string {
+  const osPaths = PLATFORMS[platform];
+  if (!osPaths) {
     throw new Error(`Unsupported platform: ${platform}. Supported platforms: ${Object.keys(PLATFORMS).join(', ')}`);
   }
 
-  const pkg = osPackages[arch];
-  if (!pkg) {
-    throw new Error(`Unsupported architecture: ${arch} for ${platform}. Supported architectures: ${Object.keys(osPackages).join(', ')}`);
+  const prebuildPath = osPaths[arch];
+  if (!prebuildPath) {
+    throw new Error(`Unsupported architecture: ${arch} for ${platform}. Supported architectures: ${Object.keys(osPaths).join(', ')}`);
   }
 
-  return pkg;
+  return prebuildPath;
 }
 
 let nativeModule: any;
 
 /**
- * Loads the native module dynamically based on platform and architecture
+ * Loads the native module dynamically based on platform and architecture.
+ * Prebuilt .node files are bundled under prebuilds/<triple>/ in the package.
  * @returns Native module
  * @throws Error if native module cannot be loaded
  */
@@ -166,13 +168,12 @@ function loadNativeModule(): any {
   }
 
   try {
-    // Try loading from platform-specific package first (CommonJS)
-    const packageName = getNativePackageName();
+    const prebuildPath = getPrebuildPath();
     try {
-      // Use require to load the native module
-      nativeModule = require(packageName);
+      // Load the bundled prebuild .node file
+      nativeModule = require(prebuildPath);
     } catch (e) {
-      // Fallback to local binary if in development
+      // Fallback to local build output if in development
       if (process.env.NODE_ENV === 'development' || process.env.NAPI_DEV) {
         try {
           nativeModule = require('./pdf-oxide');
@@ -234,66 +235,145 @@ function wrapNativeClass(nativeClass: any, asyncMethods: string[] = []): any {
   return nativeClass;
 }
 
-// List of async methods for each class (Phase 2.4 implementation)
-const asyncMethodsByClass: Record<string, string[]> = {
-  PdfDocument: [
-    'extract_text_async',
-    'to_markdown_async',
-  ],
-  Pdf: [
-    'save_async',
-  ],
-  PdfBuilder: [],
-  PdfPage: [],
-  PdfElement: [],
-  PdfText: [],
-  PdfImage: [],
-  PdfPath: [],
-  PdfTable: [],
-  PdfStructure: [],
-  Annotation: [],
-  TextAnnotation: [],
-  HighlightAnnotation: [],
-  LinkAnnotation: [],
-  TextSearcher: [],
-};
+// ---------------------------------------------------------------------------
+// JS wrapper classes around native loose-function exports.
+//
+// The binding.cc addon exports flat C functions (openDocument, extractText,
+// pdfFromMarkdown, …) not N-API class constructors. These TS classes provide
+// the idiomatic JS/TS API that users import. They mirror the Go binding's
+// PdfDocument / PdfCreator / DocumentEditor pattern exactly — a handle-based
+// lifecycle wrapping the same FFI surface.
+// ---------------------------------------------------------------------------
 
-// Wrap native classes with error handling and property getters
-const wrappedClasses: Record<string, any> = {};
-for (const className of Object.keys(asyncMethodsByClass)) {
-  if (native[className]) {
-    wrappedClasses[className] = wrapNativeClass(native[className], asyncMethodsByClass[className]);
+class PdfDocumentImpl {
+  private _handle: any;
+  private _closed = false;
+
+  constructor(handle: any) {
+    if (!handle) throw new Error('Failed to open document');
+    this._handle = handle;
   }
+
+  static open(path: string): PdfDocumentImpl {
+    const handle = native.openDocument(path);
+    return new PdfDocumentImpl(handle);
+  }
+
+  static openFromBuffer(buffer: Buffer | Uint8Array): PdfDocumentImpl {
+    const handle = native.openFromBuffer(buffer);
+    return new PdfDocumentImpl(handle);
+  }
+
+  static openWithPassword(path: string, password: string): PdfDocumentImpl {
+    const handle = native.openWithPassword(path, password);
+    return new PdfDocumentImpl(handle);
+  }
+
+  private ensureOpen(): void {
+    if (this._closed) throw new Error('Document is closed');
+  }
+
+  get handle(): any { return this._handle; }
+
+  pageCount(): number { this.ensureOpen(); return native.getPageCount(this._handle); }
+  getPageCount(): number { return this.pageCount(); }
+  get PageCount(): number { return this.pageCount(); }
+
+  extractText(pageIndex: number): string { this.ensureOpen(); return native.extractText(this._handle, pageIndex); }
+  toMarkdown(pageIndex: number): string { this.ensureOpen(); return native.toMarkdown(this._handle, pageIndex); }
+  toHtml(pageIndex: number): string { this.ensureOpen(); return native.toHtml(this._handle, pageIndex); }
+  toPlainText(pageIndex: number): string { this.ensureOpen(); return native.toPlainText(this._handle, pageIndex); }
+  toMarkdownAll(): string { this.ensureOpen(); return native.toMarkdownAll(this._handle); }
+  extractAllText(): string { this.ensureOpen(); return native.extractAllText(this._handle); }
+  toHtmlAll(): string { this.ensureOpen(); return native.toHtmlAll(this._handle); }
+  toPlainTextAll(): string { this.ensureOpen(); return native.toPlainTextAll(this._handle); }
+
+  getVersion(): { major: number; minor: number } { this.ensureOpen(); return native.getVersion(this._handle); }
+  hasStructureTree(): boolean { this.ensureOpen(); return native.hasStructureTree(this._handle); }
+  hasXFA(): boolean { this.ensureOpen(); return native.hasXFA(this._handle); }
+
+  getPageWidth(pageIndex: number): number { this.ensureOpen(); return native.getPageWidth(this._handle, pageIndex); }
+  getPageHeight(pageIndex: number): number { this.ensureOpen(); return native.getPageHeight(this._handle, pageIndex); }
+  getPageRotation(pageIndex: number): number { this.ensureOpen(); return native.getPageRotation(this._handle, pageIndex); }
+
+  searchPage(pageIndex: number, query: string, caseSensitive = false): any {
+    this.ensureOpen();
+    return native.searchPage(this._handle, pageIndex, query, caseSensitive);
+  }
+
+  searchAll(query: string, caseSensitive = false): any {
+    this.ensureOpen();
+    return native.searchAll(this._handle, query, caseSensitive);
+  }
+
+  getFormFields(): any { this.ensureOpen(); return native.getFormFields(this._handle); }
+  getOutline(): any { this.ensureOpen(); return native.getOutline(this._handle); }
+  getPageAnnotations(pageIndex: number): any { this.ensureOpen(); return native.getPageAnnotations(this._handle, pageIndex); }
+  getEmbeddedFonts(pageIndex: number): any { this.ensureOpen(); return native.getEmbeddedFonts(this._handle, pageIndex); }
+  getEmbeddedImages(pageIndex: number): any { this.ensureOpen(); return native.getEmbeddedImages(this._handle, pageIndex); }
+
+  close(): void {
+    if (!this._closed && this._handle) {
+      native.closeDocument(this._handle);
+      this._closed = true;
+    }
+  }
+
+  [Symbol.dispose](): void { this.close(); }
 }
 
-// Add property getters to enhance idiomatic JavaScript API
-if (wrappedClasses.PdfDocument) {
-  addPdfDocumentProperties(wrappedClasses.PdfDocument);
-}
-if (wrappedClasses.Pdf) {
-  addPdfProperties(wrappedClasses.Pdf);
-}
-if (wrappedClasses.PdfPage) {
-  addPdfPageProperties(wrappedClasses.PdfPage);
+class PdfImpl {
+  private _handle: any;
+  private _closed = false;
+
+  constructor(handle: any) {
+    if (!handle) throw new Error('Failed to create PDF');
+    this._handle = handle;
+  }
+
+  static fromMarkdown(markdown: string): PdfImpl {
+    return new PdfImpl(native.pdfFromMarkdown(markdown));
+  }
+
+  static fromHtml(html: string): PdfImpl {
+    return new PdfImpl(native.pdfFromHtml(html));
+  }
+
+  static fromText(text: string): PdfImpl {
+    return new PdfImpl(native.pdfFromText(text));
+  }
+
+  static fromImage(path: string): PdfImpl {
+    return new PdfImpl(native.pdfFromImage(path));
+  }
+
+  static fromImageBytes(data: Buffer | Uint8Array): PdfImpl {
+    return new PdfImpl(native.pdfFromImageBytes(data));
+  }
+
+  private ensureOpen(): void {
+    if (this._closed) throw new Error('PDF handle is closed');
+  }
+
+  save(path: string): void { this.ensureOpen(); native.pdfSave(this._handle, path); }
+  saveToBytes(): Buffer { this.ensureOpen(); return native.pdfSaveToBytes(this._handle); }
+  pageCount(): number { this.ensureOpen(); return native.pdfGetPageCount(this._handle); }
+
+  close(): void {
+    if (!this._closed && this._handle) {
+      native.pdfFree(this._handle);
+      this._closed = true;
+    }
+  }
+
+  [Symbol.dispose](): void { this.close(); }
 }
 
 // Export as ES module
 const getVersion = native.getVersion;
 const getPdfOxideVersion = native.getPdfOxideVersion;
-const PdfDocument = wrappedClasses.PdfDocument || native.PdfDocument;
-const Pdf = wrappedClasses.Pdf || native.Pdf;
-// PdfBuilder is imported from ./builders/index - don't redeclare
-const PdfPage = wrappedClasses.PdfPage || native.PdfPage;
-const PdfElement = wrappedClasses.PdfElement || native.PdfElement;
-const PdfText = wrappedClasses.PdfText || native.PdfText;
-const PdfImage = wrappedClasses.PdfImage || native.PdfImage;
-const PdfPath = wrappedClasses.PdfPath || native.PdfPath;
-const PdfTable = wrappedClasses.PdfTable || native.PdfTable;
-const PdfStructure = wrappedClasses.PdfStructure || native.PdfStructure;
-const Annotation = wrappedClasses.Annotation || native.Annotation;
-const TextAnnotation = wrappedClasses.TextAnnotation || native.TextAnnotation;
-const HighlightAnnotation = wrappedClasses.HighlightAnnotation || native.HighlightAnnotation;
-const LinkAnnotation = wrappedClasses.LinkAnnotation || native.LinkAnnotation;
+const PdfDocument = PdfDocumentImpl as any;
+const Pdf = PdfImpl as any;
 const PdfError = PdfException;
 const PageSize = native.PageSize;
 const Rect = native.Rect;
@@ -302,7 +382,7 @@ const Color = native.Color;
 const ConversionOptions = native.ConversionOptions;
 const SearchOptions = native.SearchOptions;
 const SearchResult = native.SearchResult;
-const TextSearcher = wrappedClasses.TextSearcher || native.TextSearcher;
+const TextSearcher = native.TextSearcher;
 
 export {
   // Version info
@@ -312,21 +392,6 @@ export {
   // Main classes
   PdfDocument,
   Pdf,
-  PdfPage,
-
-  // Element types
-  PdfElement,
-  PdfText,
-  PdfImage,
-  PdfPath,
-  PdfTable,
-  PdfStructure,
-
-  // Annotation types
-  Annotation,
-  TextAnnotation,
-  HighlightAnnotation,
-  LinkAnnotation,
 
   // Error types
   PdfError,
