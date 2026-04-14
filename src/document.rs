@@ -203,6 +203,11 @@ pub struct PdfDocument {
     /// Cached object offsets from full file scan (built on first xref miss).
     /// Maps object number to byte offset in file.
     scanned_object_offsets: Mutex<Option<HashMap<u32, u64>>>,
+    /// Whether the one-time object-stream recovery sweep has been attempted.
+    /// See `recover_from_object_streams`. Separate from the scanned offsets
+    /// cache because the sweep is only triggered on free-entry misses that
+    /// also failed the file-body scan — the common path never needs it.
+    objstm_recovery_done: Mutex<bool>,
     /// Cache of XObject refs known to NOT be Form XObjects (i.e., Image or unknown).
     /// Used by text extraction to skip expensive full-object loads for images.
     image_xobject_cache: Mutex<HashSet<ObjectRef>>,
@@ -302,6 +307,112 @@ pub enum PageArea {
     Header,
     /// Bottom region (Footer)
     Footer,
+}
+
+/// Scan raw file bytes for candidate ObjStm positions.
+///
+/// Each hit is `(object_number, byte_offset_of_N_G_obj_header)`. We look
+/// for the shape `N G obj ... /Type /ObjStm` within a small window after
+/// each object header so that the caller can then `load_uncompressed_object`
+/// at exactly that offset without parsing the whole file body.
+///
+/// The scan is intentionally tolerant: it doesn't require `/Type` and
+/// `/ObjStm` to be separated by whitespace (many producers write
+/// `/Type/ObjStm`), doesn't anchor on any particular position within the
+/// header, and doesn't rely on xref entries being correct — which is the
+/// whole point of the recovery path it serves.
+fn find_objstm_candidates(content: &[u8]) -> Vec<(u32, u64)> {
+    const DICT_PEEK_BYTES: usize = 2048;
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < content.len() {
+        let valid_start = pos == 0
+            || content[pos - 1] == b'\n'
+            || content[pos - 1] == b'\r'
+            || content[pos - 1] == b' ';
+        if !valid_start || !content[pos].is_ascii_digit() {
+            pos += 1;
+            continue;
+        }
+        let header_start = pos;
+
+        // Parse N (object number)
+        let num_start = pos;
+        while pos < content.len() && content[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos >= content.len() || content[pos] != b' ' {
+            pos = header_start + 1;
+            continue;
+        }
+        let obj_num: u32 = match std::str::from_utf8(&content[num_start..pos])
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            Some(n) => n,
+            None => {
+                pos = header_start + 1;
+                continue;
+            },
+        };
+        pos += 1;
+
+        // Parse G (generation)
+        let gen_start = pos;
+        while pos < content.len() && content[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos >= content.len() || content[pos] != b' ' {
+            pos = header_start + 1;
+            continue;
+        }
+        if std::str::from_utf8(&content[gen_start..pos])
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .is_none()
+        {
+            pos = header_start + 1;
+            continue;
+        }
+        pos += 1;
+
+        // Require literal "obj"
+        if pos + 3 > content.len() || &content[pos..pos + 3] != b"obj" {
+            pos = header_start + 1;
+            continue;
+        }
+
+        // Peek up to DICT_PEEK_BYTES ahead for `/Type` followed (after
+        // optional whitespace) by `/ObjStm`. We don't decompress — the
+        // ObjStm dict header is always uncompressed plaintext even when
+        // the stream body is Flate-encoded.
+        let window_end = (pos + DICT_PEEK_BYTES).min(content.len());
+        let window = &content[pos..window_end];
+        if contains_objstm_marker(window) {
+            out.push((obj_num, header_start as u64));
+        }
+
+        pos = header_start + 1;
+    }
+    out
+}
+
+fn contains_objstm_marker(window: &[u8]) -> bool {
+    // Tolerant match: find `/Type` then allow optional whitespace before `/ObjStm`.
+    let mut i = 0;
+    while i + 5 <= window.len() {
+        if &window[i..i + 5] == b"/Type" {
+            let mut j = i + 5;
+            while j < window.len() && (window[j] == b' ' || window[j] == b'\t' || window[j] == b'\r' || window[j] == b'\n') {
+                j += 1;
+            }
+            if j + 7 <= window.len() && &window[j..j + 7] == b"/ObjStm" {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 impl PdfDocument {
@@ -451,6 +562,7 @@ impl PdfDocument {
             page_cache: HashMap::new(),
             page_cache_populated: false,
             scanned_object_offsets: Mutex::new(None),
+            objstm_recovery_done: Mutex::new(false),
             image_xobject_cache: Mutex::new(HashSet::new()),
             xobject_text_free_cache: Mutex::new(HashSet::new()),
             xobject_stream_cache: Mutex::new(HashMap::new()),
@@ -941,6 +1053,114 @@ impl PdfDocument {
         }
     }
 
+    /// One-time sweep over every known object stream (`/Type /ObjStm`),
+    /// used to recover from xref tables that mis-mark compressed objects as
+    /// free.
+    ///
+    /// Some PDF producers emit an xref where a compressed object's slot is
+    /// type 0 (free) instead of type 2 (compressed → stream#). The object
+    /// is physically stored inside an `ObjStm`, but `scan_for_object` can't
+    /// find it because it has no standalone `N G obj` marker in the body.
+    ///
+    /// The recovery: iterate every uncompressed candidate, peek at the
+    /// dictionary, and for those that are `/Type /ObjStm`, parse the stream
+    /// and cache everything inside (overwriting any stale `Object::Null`
+    /// entries from earlier free-entry short-circuits).
+    ///
+    /// Runs at most once per document — guarded by `objstm_recovery_done`.
+    /// Cost is amortised across every recovered object.
+    fn recover_from_object_streams(&self) {
+        use crate::objstm::parse_object_stream_with_decryption;
+
+        let mut done = self.objstm_recovery_done.lock().unwrap();
+        if *done {
+            return;
+        }
+        *done = true;
+        drop(done);
+
+        log::debug!("Sweeping object streams to recover xref-flagged-free objects");
+
+        // Find ObjStm candidates by raw pattern search in the file body.
+        //
+        // Why not iterate xref entries here: the xref is precisely what we
+        // don't trust in this recovery path — its offsets may be wrong and
+        // its type tags may be lying about what each slot contains. A raw
+        // search for `N G obj ... /Type /ObjStm` finds every object stream
+        // the producer actually wrote, independent of how the xref
+        // describes them.
+        let file_bytes = {
+            let mut r = self.reader.lock().unwrap();
+            if r.seek(SeekFrom::Start(0)).is_err() {
+                return;
+            }
+            let mut buf = Vec::new();
+            if r.read_to_end(&mut buf).is_err() {
+                return;
+            }
+            buf
+        };
+
+        let candidates = find_objstm_candidates(&file_bytes);
+
+        let mut objstms_found = 0usize;
+        let mut recovered = 0usize;
+        for (stream_obj_num, offset) in &candidates {
+            let stream_ref = ObjectRef::new(*stream_obj_num, 0);
+            let stream_obj = match self.load_uncompressed_object(stream_ref, *offset) {
+                Ok(obj) => obj,
+                Err(_) => continue,
+            };
+
+            let is_objstm = stream_obj
+                .as_dict()
+                .and_then(|d| d.get("Type"))
+                .and_then(|t| t.as_name())
+                .is_some_and(|n| n == "ObjStm");
+            if !is_objstm {
+                continue;
+            }
+            objstms_found += 1;
+
+            // Parse the stream body. ISO 32000-2:2020 §7.6.3 says ObjStm
+            // shall NOT be individually encrypted, so skip decryption here
+            // — mirrors the default branch in `load_compressed_object`.
+            let objects_map = match parse_object_stream_with_decryption(&stream_obj, None, 0, 0) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::debug!(
+                        "Skipping ObjStm {} during recovery sweep (parse failed: {})",
+                        stream_obj_num,
+                        e
+                    );
+                    continue;
+                },
+            };
+
+            let mut cache = self.object_cache.lock().unwrap();
+            for (obj_num, object) in objects_map {
+                let cache_ref = ObjectRef::new(obj_num, 0);
+                // Only overwrite entries we'd otherwise have resolved to
+                // Null (the free-entry short-circuit caches Null). Never
+                // clobber a real object loaded through the normal path.
+                match cache.get(&cache_ref) {
+                    Some(Object::Null) | None => {
+                        cache.insert(cache_ref, object);
+                        recovered += 1;
+                    },
+                    _ => {},
+                }
+            }
+        }
+
+        log::debug!(
+            "Object-stream recovery sweep: {} candidate positions, {} ObjStms, {} objects cached",
+            candidates.len(),
+            objstms_found,
+            recovered
+        );
+    }
+
     /// Load an object by its reference.
     ///
     /// This function:
@@ -1068,51 +1288,65 @@ impl PdfDocument {
 
         // Check if object is in use
         if !entry.in_use {
-            log::warn!(
+            log::debug!(
                 "Object {} is marked as free (not in use). This may be due to a corrupted xref table.",
                 obj_ref.id
             );
 
-            // For critical objects like catalog/root, try to find them by scanning
-            // rather than immediately failing
-            if obj_ref.id <= 10 {
-                log::info!(
-                    "Object {} is a low-numbered object (likely critical), attempting fallback lookup",
-                    obj_ref.id
+            // xref flags the object free, but this may be xref corruption
+            // rather than an actual deletion. Run two recovery paths before
+            // falling back to §7.3.10's null. The branches below apply
+            // uniformly for all object ids (critical low-numbered catalog
+            // objects and page objects in the thousands); previously low
+            // ids took a separate "fall through to loading logic" path
+            // that silently hit the Free arm of the entry_type match and
+            // still ended up Null.
+            //
+            // Recovery path 1 — standalone `N G obj` marker in the file
+            // body. `scan_for_object` builds a whole-file offset map once
+            // per document and caches it, so the amortised cost is a
+            // single O(filesize) pass no matter how many free-marked
+            // objects we probe.
+            if let Ok(scanned_offset) = self.scan_for_object(obj_ref) {
+                log::debug!(
+                    "Object {} marked free in xref but found in file scan at offset {}; recovering",
+                    obj_ref.id,
+                    scanned_offset
                 );
-                // File scanning fallback implemented via get_page_by_scanning() (Issues #54, #57)
-                if entry.offset > 0 && entry.offset < 100_000_000 {
-                    log::info!(
-                        "Attempting to load object {} from offset {} despite free status",
-                        obj_ref.id,
-                        entry.offset
-                    );
-                    // Fall through to loading logic below
-                } else {
-                    // PDF Spec §7.3.10: treat as null
-                    log::warn!(
-                        "Free object {} (id <= 10, bad offset), treating as Null",
+                self.resolving_stack.lock().unwrap().insert(obj_ref);
+                *self.recursion_depth.lock().unwrap() += 1;
+                let result = self.load_uncompressed_object(obj_ref, scanned_offset);
+                *self.recursion_depth.lock().unwrap() -= 1;
+                self.resolving_stack.lock().unwrap().remove(&obj_ref);
+                return result;
+            }
+
+            // Recovery path 2 — the object may be compressed inside a
+            // `/Type /ObjStm`. Real-world producers have been seen to
+            // mis-flag every compressed object's xref slot as free, so
+            // sweep the object streams once and recheck the cache.
+            self.recover_from_object_streams();
+            if let Some(obj) = self.object_cache.lock().unwrap().get(&obj_ref).cloned() {
+                if !matches!(obj, Object::Null) {
+                    log::debug!(
+                        "Object {} recovered from object-stream sweep",
                         obj_ref.id
                     );
-                    self.object_cache
-                        .lock()
-                        .unwrap()
-                        .insert(obj_ref, Object::Null);
-                    return Ok(Object::Null);
+                    return Ok(obj);
                 }
-            } else {
-                // PDF Spec §7.3.10: free object treated as null
-                log::warn!(
-                    "Free object {} gen {}, treating as Null per §7.3.10",
-                    obj_ref.id,
-                    obj_ref.gen
-                );
-                self.object_cache
-                    .lock()
-                    .unwrap()
-                    .insert(obj_ref, Object::Null);
-                return Ok(Object::Null);
             }
+
+            // PDF Spec §7.3.10: free object treated as null
+            log::warn!(
+                "Free object {} gen {}, treating as Null per §7.3.10",
+                obj_ref.id,
+                obj_ref.gen
+            );
+            self.object_cache
+                .lock()
+                .unwrap()
+                .insert(obj_ref, Object::Null);
+            return Ok(Object::Null);
         }
 
         // Mark as being resolved (cycle detection)
@@ -2914,10 +3148,25 @@ impl PdfDocument {
     fn get_page_by_scanning(&mut self, target_index: usize) -> Result<Object> {
         let mut current_index = 0;
 
-        // Collect all object numbers first to avoid borrow checker issues
-        // Sort for deterministic iteration order (HashMap iteration is non-deterministic)
+        // Prime the ObjStm recovery cache up front when the xref looks
+        // unreliable. Without this, the first pass below iterates only
+        // `xref.all_object_numbers()` — which misses compressed objects
+        // whose xref slots have been mis-flagged free. The sweep is a
+        // one-shot, guarded by `objstm_recovery_done`, so this is cheap
+        // if recovery already happened.
+        self.recover_from_object_streams();
+
+        // Collect all object numbers first to avoid borrow checker issues.
+        // Sort for deterministic iteration order (HashMap iteration is
+        // non-deterministic). We union the xref-listed ids with the object
+        // ids recovered from the ObjStm sweep so that pages compressed in
+        // streams whose xref slots were mis-flagged free still get visited.
         let mut obj_nums: Vec<u32> = self.xref.all_object_numbers().collect();
+        for r in self.object_cache.lock().unwrap().keys() {
+            obj_nums.push(r.id);
+        }
         obj_nums.sort_unstable();
+        obj_nums.dedup();
 
         // First pass: look for objects with /Type /Page
         for &obj_num in &obj_nums {
@@ -2940,38 +3189,42 @@ impl PdfDocument {
             }
         }
 
-        // Second pass: heuristic detection for pages without /Type entry
-        // Look for dicts with /MediaBox, /Contents, /Resources, or /Parent but no /Type
-        if current_index == 0 {
-            let mut heuristic_index = 0;
-            for &obj_num in &obj_nums {
-                if let Ok(obj) = self.load_object(ObjectRef {
-                    id: obj_num,
-                    gen: 0,
-                }) {
-                    if let Some(dict) = obj.as_dict() {
-                        let has_no_type = dict.get("Type").is_none();
-                        // Also handle /Type that is an unresolvable reference (Null)
-                        let type_is_null =
-                            dict.get("Type").is_some_and(|t| matches!(t, Object::Null));
-                        if (has_no_type || type_is_null)
-                            && (dict.contains_key("MediaBox")
-                                || dict.contains_key("Contents")
-                                || (dict.contains_key("Resources") && dict.contains_key("Parent")))
-                        {
-                            log::debug!(
-                                "Heuristic page candidate: object {} (page-like keys without valid /Type)",
-                                obj_num
-                            );
-                            if heuristic_index == target_index {
-                                return Ok(obj);
-                            }
-                            heuristic_index += 1;
+        // Second pass: heuristic detection for pages without /Type entry.
+        // Runs as a complement to pass 1 — counts page-like dicts that lack
+        // a /Type entry alongside the /Type /Page matches, so that PDFs
+        // whose corruption stripped /Type from some page dicts still reach
+        // the full page count. Previously this pass only ran when pass 1
+        // found zero pages, which meant any partial pass-1 match (e.g. 200
+        // of 253 pages) would silently short pass 2 and fail.
+        let mut heuristic_index = current_index;
+        for &obj_num in &obj_nums {
+            if let Ok(obj) = self.load_object(ObjectRef {
+                id: obj_num,
+                gen: 0,
+            }) {
+                if let Some(dict) = obj.as_dict() {
+                    let has_no_type = dict.get("Type").is_none();
+                    // Also handle /Type that is an unresolvable reference (Null)
+                    let type_is_null =
+                        dict.get("Type").is_some_and(|t| matches!(t, Object::Null));
+                    if (has_no_type || type_is_null)
+                        && (dict.contains_key("MediaBox")
+                            || dict.contains_key("Contents")
+                            || (dict.contains_key("Resources") && dict.contains_key("Parent")))
+                    {
+                        log::debug!(
+                            "Heuristic page candidate: object {} (page-like keys without valid /Type)",
+                            obj_num
+                        );
+                        if heuristic_index == target_index {
+                            return Ok(obj);
                         }
+                        heuristic_index += 1;
                     }
                 }
             }
         }
+        current_index = heuristic_index;
 
         // Third pass: try resolving /Kids from catalog's /Pages root directly
         if current_index == 0 {
