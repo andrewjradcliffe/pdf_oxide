@@ -4,15 +4,19 @@ exclude = ["js"]
 
 [package]
 name = "pdf_oxide"
-version = "0.3.30"
+version = "0.3.31"
+# Anchor patterns with a leading slash — Cargo uses gitignore-style globs, so
+# a bare "README.md" matches every README.md recursively (was pulling in 20+
+# subdir READMEs plus js/node_modules/*/README.md into the sdist). Leading /
+# anchors to the package root.
 include = [
-    "src/**/*",
-    "benches/**/*",
-    "Cargo.toml",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-    "README.md",
-    "include/**/*",
+    "/src/**/*",
+    "/benches/**/*",
+    "/Cargo.toml",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/README.md",
+    "/include/**/*",
 ]
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]

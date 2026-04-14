@@ -354,6 +354,17 @@ jobs:
           cp include/pdf_oxide_c/pdf_oxide.h native-out/
           ls -la native-out/
 
+      # Shrink staticlib: strip .llvmbc (35MB/lib) + DWARF. Consumed by Go CGo
+      # and node-gyp, neither of which uses the embedded LLVM bitcode. On MSVC
+      # .lib (COFF archive) binutils isn't available, so skip — MSVC output is
+      # also substantially smaller to begin with.
+      - name: Shrink staticlib
+        if: matrix.staticlib_name == 'libpdf_oxide.a'
+        shell: bash
+        run: |
+          bash scripts/shrink-staticlib.sh "native-out/${{ matrix.staticlib_name }}"
+          ls -la native-out/
+
       - name: Upload native lib
         uses: actions/upload-artifact@v7
         with:
@@ -361,82 +372,119 @@ jobs:
           path: native-out/
           retention-days: 7
 
-  # Update Go module with prebuilt native libraries
-  # This ensures `go get` works without requiring users to build Rust
-  update-go-native-libs:
-    name: Update Go native libs
-    needs: [validate, build-native-libs, build-nodejs, build-csharp, build-binaries, build-python-wheels, build-python-wheels-musl, build-wasm]
+  # Package per-platform Go FFI tarballs as GitHub Release assets.
+  #
+  # v0.3.31 (#TBD) replaces the previous "commit .a files into go/lib/" flow
+  # with on-demand download: consumers run
+  #   go run github.com/yfedoseev/pdf_oxide/go/cmd/install@v{VERSION}
+  # which fetches the matching asset from the release and prints the
+  # CGO_CFLAGS / CGO_LDFLAGS to export. This keeps the Go module source-only
+  # (~500 KB) and removes ~310 MB of per-release git bloat.
+  package-go-ffi:
+    name: Package Go FFI release assets
+    needs: [validate, build-native-libs]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download all native libraries
+      - name: Download all native-lib artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: native-libs
 
-      - name: Stage native libs in Go module
+      - name: Pack per-platform go-ffi tarballs + sha256
         run: |
-          # #334: ship staticlib archives (.a) so Go binaries are self-contained.
-          # Remove any stale shared-library artifacts from previous releases so
-          # git doesn't continue tracking them after the v0.3.26 switch-over.
-          find go/lib -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) -delete
+          set -euxo pipefail
+          OUT="go-ffi-out"
+          mkdir -p "$OUT"
 
-          cp native-libs/native-linux-x86_64/libpdf_oxide.a   go/lib/linux_amd64/
-          cp native-libs/native-linux-aarch64/libpdf_oxide.a  go/lib/linux_arm64/
-          cp native-libs/native-macos-x86_64/libpdf_oxide.a   go/lib/darwin_amd64/
-          cp native-libs/native-macos-aarch64/libpdf_oxide.a  go/lib/darwin_arm64/
+          pack() {
+            local platform="$1" src_artifact="$2" src_lib="$3"
+            local tmp="tmp-$platform"
+            rm -rf "$tmp"
+            mkdir -p "$tmp/lib/$platform" "$tmp/include"
 
-          # Windows x64: MinGW-compiled staticlib (from the x86_64-pc-windows-gnu
-          # cross-compile row) — compatible with CGo's default MinGW gcc linker.
-          cp native-libs/native-windows-x86_64-gnu/libpdf_oxide.a go/lib/windows_amd64/
+            cp "native-libs/$src_artifact/$src_lib" "$tmp/lib/$platform/libpdf_oxide.a"
+            cp include/pdf_oxide_c/pdf_oxide.h "$tmp/include/pdf_oxide.h"
 
-          # Windows ARM64: no supported GNU toolchain yet, stay on dynamic .dll
-          # until gnullvm stabilises. Ship the cdylib from the MSVC build so the
-          # existing fallback CGo directive keeps working.
-          cp native-libs/native-windows-aarch64/pdf_oxide.dll go/lib/windows_arm64/ 2>/dev/null || true
+            # Normalise platform name for the asset filename (darwin_arm64 -> darwin-arm64)
+            local asset_name="${platform/_/-}"
+            local tgz="$OUT/pdf_oxide-go-ffi-$asset_name.tar.gz"
+            tar -C "$tmp" -czf "$tgz" lib include
 
-          echo "=== Go native libs staged ==="
-          find go/lib -type f -not -name ".gitkeep" -not -name "README.md" -not -name ".ci-build" | sort
+            # sha256 file sits alongside the tarball on the release. The Go
+            # installer downloads both and aborts if the hash doesn't match,
+            # so a compromised CDN or typo in an asset name fails closed.
+            (cd "$OUT" && sha256sum "pdf_oxide-go-ffi-$asset_name.tar.gz" > "pdf_oxide-go-ffi-$asset_name.tar.gz.sha256")
+          }
 
-      - name: Commit and push native libs
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Marker file is checked by .githooks/pre-commit to distinguish
-          # CI-authored native-lib commits from accidental local dev commits.
-          echo "$GITHUB_SHA" > go/lib/.ci-build
-          # -A captures deletions too — important when we switch from .so/.dylib
-          # /.dll to .a and need to drop the old files in the same commit (#334).
-          git add -A go/lib/
-          if git diff --cached --quiet; then
-            echo "No changes to native libs"
-          else
-            git commit -m "ci: update Go native libs for v${{ needs.validate.outputs.version }}"
-            git push origin HEAD:main
-          fi
+          pack linux_amd64   native-linux-x86_64       libpdf_oxide.a
+          pack linux_arm64   native-linux-aarch64      libpdf_oxide.a
+          pack darwin_amd64  native-macos-x86_64       libpdf_oxide.a
+          pack darwin_arm64  native-macos-aarch64      libpdf_oxide.a
+          # Windows x64: MinGW cross-compiled .a (CGo uses MinGW gcc).
+          pack windows_amd64 native-windows-x86_64-gnu libpdf_oxide.a
 
-      - name: Create Go module tag
+          echo "=== Go FFI release assets ==="
+          ls -lh "$OUT/"
+
+      - name: Upload go-ffi assets artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-ffi-assets
+          path: |
+            go-ffi-out/*.tar.gz
+            go-ffi-out/*.tar.gz.sha256
+          retention-days: 7
+
+  # Creates the `go/v<version>` sub-module tag.
+  #
+  # IMPORTANT: this runs AFTER `create-release` publishes the release with
+  # its FFI tarballs attached. If the order were reversed, `go install
+  # github.com/.../cmd/install@latest` could briefly resolve the new tag
+  # while the installer then 404s fetching the FFI asset. By only tagging
+  # once the GitHub Release is up, `@latest` is consistent with reality.
+  tag-go-module:
+    name: Tag Go module
+    needs: [validate, create-release]
+    runs-on: ubuntu-latest
+    # Restricted to full releases (no `-rc.1`-style prereleases), matching
+    # verify-go-install. Tagging a Go module drops the tag on module-proxy /
+    # sum.golang.org in minutes, and we don't want RC tags polluting that.
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push go/v<version> tag
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
-          # Go submodule tags use directory prefix
-          # Since go.mod is in go/, the tag is go/v{VERSION}
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           if git ls-remote --tags origin "go/v${VERSION}" | grep -q .; then
             echo "Tag go/v${VERSION} already exists on remote — skipping"
-          else
-            git tag "go/v${VERSION}"
-            git push origin "go/v${VERSION}"
+            exit 0
           fi
 
-  # Local path verification that the Go module builds correctly with the
-  # freshly-staged native libraries. Uses `replace` directive so we never
-  # touch sum.golang.org — avoids flaky tag-propagation races.
+          # Tag the commit that validate.yml resolved to — same SHA that
+          # produced the release assets, so `go install @v${VERSION}`
+          # downloads source that matches the FFI on the release.
+          git tag "go/v${VERSION}" "${{ github.sha }}"
+          git push origin "go/v${VERSION}"
+
+  # Local path verification that the Go module builds correctly against the
+  # freshly-packaged go-ffi asset. Simulates the end-user flow: extract the
+  # archive locally, export CGO_CFLAGS/LDFLAGS (as the installer would print),
+  # then build a tiny consumer against a `replace`-d local checkout. Uses
+  # `replace` so we avoid touching sum.golang.org before the tag propagates.
   verify-go-install:
     name: Verify Go build (${{ matrix.os }})
-    needs: [validate, update-go-native-libs]
+    needs: [validate, package-go-ffi]
     runs-on: ${{ matrix.os }}
     if: ${{ !contains(needs.validate.outputs.version, '-') }}
     strategy:
@@ -445,37 +493,56 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
-        with:
-          ref: main
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Download native-lib artifacts
+      - name: Download go-ffi assets
         uses: actions/download-artifact@v8
         with:
-          pattern: native-*
-          path: native-libs
+          name: go-ffi-assets
+          path: go-ffi-assets
 
-      - name: Stage native libs in go/lib/
-        shell: bash
-        run: |
-          cp native-libs/native-linux-x86_64/libpdf_oxide.a   go/lib/linux_amd64/  2>/dev/null || true
-          cp native-libs/native-linux-aarch64/libpdf_oxide.a  go/lib/linux_arm64/  2>/dev/null || true
-          cp native-libs/native-macos-x86_64/libpdf_oxide.a   go/lib/darwin_amd64/ 2>/dev/null || true
-          cp native-libs/native-macos-aarch64/libpdf_oxide.a  go/lib/darwin_arm64/ 2>/dev/null || true
-          cp native-libs/native-windows-x86_64-gnu/libpdf_oxide.a go/lib/windows_amd64/ 2>/dev/null || true
-
-      - name: Build local consumer with replace directive
+      - name: Verify checksum + extract FFI asset
+        id: extract
         shell: bash
         run: |
           set -euxo pipefail
+          case "${{ matrix.os }}" in
+            ubuntu-latest) asset=pdf_oxide-go-ffi-linux-amd64.tar.gz;   goarch_dir=linux_amd64 ;;
+            macos-latest)  asset=pdf_oxide-go-ffi-darwin-arm64.tar.gz;  goarch_dir=darwin_arm64 ;;
+            *) echo "unsupported matrix os: ${{ matrix.os }}" && exit 1 ;;
+          esac
+
+          # Checksum gate — this is the same check the Go installer performs
+          # at runtime. Guards against truncated CI artifacts and divergence
+          # between the .tar.gz and .sha256 we publish.
+          (cd go-ffi-assets && shasum -a 256 -c "${asset}.sha256")
+
+          mkdir -p "$HOME/.pdf_oxide/v${{ needs.validate.outputs.version }}"
+          tar -C "$HOME/.pdf_oxide/v${{ needs.validate.outputs.version }}" \
+              -xzf "go-ffi-assets/$asset"
+          echo "install_dir=$HOME/.pdf_oxide/v${{ needs.validate.outputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "lib_dir=$HOME/.pdf_oxide/v${{ needs.validate.outputs.version }}/lib/$goarch_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Build local consumer with replace directive
+        shell: bash
+        env:
+          CGO_CFLAGS: -I${{ steps.extract.outputs.install_dir }}/include
+        run: |
+          set -euxo pipefail
+
+          case "${{ matrix.os }}" in
+            ubuntu-latest) CGO_LDFLAGS="${{ steps.extract.outputs.lib_dir }}/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc" ;;
+            macos-latest)  CGO_LDFLAGS="${{ steps.extract.outputs.lib_dir }}/libpdf_oxide.a -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv" ;;
+          esac
+          export CGO_LDFLAGS
+
           WORK="$(mktemp -d)"
           cd "$WORK"
           go mod init verify
-          # Point at the local checkout instead of fetching from the registry
           go mod edit -replace "github.com/yfedoseev/pdf_oxide/go=$GITHUB_WORKSPACE/go"
           go mod edit -require "github.com/yfedoseev/pdf_oxide/go@v0.0.0"
           cat > main.go <<'EOT'
@@ -504,7 +571,7 @@ jobs:
           }
           EOT
           go build -o verify ./...
-          # Prove the binary is self-contained: no runtime lookup of libpdf_oxide.
+          # Self-contained binary: no runtime lookup of libpdf_oxide.
           unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH
           ./verify
 
@@ -564,6 +631,23 @@ jobs:
           ls -la ../lib/
           npx node-gyp rebuild
           ls -la build/Release/
+
+      # node-gyp links release mode but doesn't strip the final .node. On
+      # Linux this was 17 MB shipped; strip takes it to ~12 MB. macOS uses
+      # strip -x (keeps global symbols N-API needs). Windows MSVC emits no
+      # PDB by default for this target, so nothing to strip.
+      - name: Strip .node addon
+        if: runner.os != 'Windows'
+        working-directory: js
+        shell: bash
+        run: |
+          BEFORE=$(wc -c < build/Release/pdf_oxide.node)
+          case "${{ runner.os }}" in
+            Linux)  strip --strip-unneeded build/Release/pdf_oxide.node ;;
+            macOS)  strip -x build/Release/pdf_oxide.node ;;
+          esac
+          AFTER=$(wc -c < build/Release/pdf_oxide.node)
+          echo "pdf_oxide.node: ${BEFORE} -> ${AFTER} bytes"
 
       - name: Upload .node artifact
         uses: actions/upload-artifact@v7
@@ -839,7 +923,13 @@ jobs:
   # Create GitHub Release
   create-release:
     name: Create GitHub Release
-    needs: [validate, build-binaries, build-python-wheels, build-python-wheels-musl, build-wasm, build-nodejs, build-csharp, update-go-native-libs]
+    # verify-go-install gates the Go flow end-to-end (checksum match,
+    # CGO_LDFLAGS recipe, FromMarkdown→Save→Open→PageCount) before we ever
+    # publish the release, so a broken .a or a stale cgo_dev.go can't leak
+    # into a tagged release. For prereleases (`-rc.1` etc.) verify-go-install
+    # is skipped; `always() && result != failure` lets the release proceed.
+    needs: [validate, build-binaries, build-python-wheels, build-python-wheels-musl, build-wasm, build-nodejs, build-csharp, package-go-ffi, verify-go-install]
+    if: ${{ always() && needs.verify-go-install.result != 'failure' && needs.package-go-ffi.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -852,7 +942,7 @@ jobs:
       - name: Organize release files
         run: |
           mkdir -p release-files
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.whl" -o -name "*.deb" -o -name "*.nupkg" \) -exec cp {} release-files/ \;
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sha256" -o -name "*.zip" -o -name "*.whl" -o -name "*.deb" -o -name "*.nupkg" \) -exec cp {} release-files/ \;
           echo "=== Release files ==="
           ls -lh release-files/
 

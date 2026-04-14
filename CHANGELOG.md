@@ -2,6 +2,37 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.31] - 2026-04-13
+
+### BREAKING — Go module install flow
+
+- **Native Rust libraries are no longer committed to `go/lib/`** — after landing the 63% staticlib shrink (below), the committed payload would still have been ~130 MB per release, accumulating indefinitely in git history. v0.3.31 instead publishes per-platform `pdf_oxide-go-ffi-<platform>.tar.gz` as GitHub Release assets and ships a small Go installer at `go/cmd/install`. Consumers run it once per machine:
+  ```
+  go get github.com/yfedoseev/pdf_oxide/go
+  go run github.com/yfedoseev/pdf_oxide/go/cmd/install@latest
+  # Installer prints the CGO_CFLAGS / CGO_LDFLAGS to export
+  ```
+  The installer downloads the matching asset into `~/.pdf_oxide/v<version>/`, SHA-256 verifies it against the signed `.sha256` published alongside, and either prints the env vars to export or (with `--write-flags=<dir>`) generates a `cgo_flags.go` next to the user's code. Monorepo / source-tree builds use `-tags pdf_oxide_dev` which points CGo at `target/release/libpdf_oxide.a` directly — no installer needed.
+
+  **`@latest` just works** — the installer reads its own module version from `runtime/debug.ReadBuildInfo()`, so every tagged release auto-matches its FFI assets without a release-time sed step. `go run .../cmd/install@latest` always resolves to the matching `.tar.gz`.
+
+  **Why:** shipping ~130 MB of binary in git per release was bloating clone time and accumulating to GBs over dozens of releases. This is the approach Kreuzberg (https://github.com/kreuzberg-dev/kreuzberg/blob/main/packages/go/v4/cmd/install/main.go) and similar Rust-in-Go projects use. Repo size per release bump drops to ~0 KB; clone stays fast forever.
+
+  **Migration:** consumers upgrading from v0.3.30 must run the install command once and export the printed `CGO_*` env vars (or add them to their shell profile / CI env). No code changes to the Go API. `go get` without the install step will fail at link time with `undefined reference to pdf_document_open ...` — the installer fixes this.
+
+- **Go release pipeline hardening** — three ordering + integrity fixes landed alongside the install-flow switch:
+  - **SHA-256 gate end-to-end.** `package-go-ffi` emits `pdf_oxide-go-ffi-<platform>.tar.gz.sha256` next to each tarball (attached to the GitHub Release). The Go installer downloads both and aborts with a checksum mismatch if they don't match; `--skip-checksum` bypasses for offline/air-gapped installs. The same `.sha256` is verified by `verify-go-install` in CI before the release is even published.
+  - **verify-go-install is now a publish gate.** `create-release` depends on `verify-go-install` — that job extracts the freshly-built tarball, matches the sha256, then builds a `FromMarkdown → Save → Open → PageCount` consumer against a local `replace` directive. A broken `.a`, a missing symbol, or a stale `cgo_dev.go` blocks the release instead of leaking through.
+  - **`go/v<version>` tag is pushed last, not first.** A new `tag-go-module` job runs *after* `create-release` has uploaded the FFI tarballs. Previously the tag was pushed during packaging, creating a window where `go install @latest` could resolve a tag whose FFI assets 404'd. Tag creation is gated on `!contains(version, '-')` so prerelease `-rc.1` tags never reach sum.golang.org.
+
+### Release Infrastructure (artifact size reductions)
+
+- **Shrink Rust static libs 62.8% before packaging** — Rust-produced staticlibs carry 35 MB of `.llvmbc` (LLVM bitcode for cross-crate LTO) + 4 MB of DWARF per platform, none of which CGo's linker or node-gyp ever uses. New `scripts/shrink-staticlib.sh` strips both via `objcopy --remove-section=.llvmbc --remove-section=.llvmcmd --strip-debug` (Linux / Windows-GNU) or `strip -S` (macOS) inside the `build-native-libs` job. Per-platform `libpdf_oxide.a` drops from ~71 MB to ~26 MB. All 85 Go-consumed FFI symbols verified intact post-strip.
+- **Strip the npm `.node` addon** — `node-gyp rebuild` left the addon unstripped (17 MB, `with debug_info, not stripped`). Added post-build `strip --strip-unneeded` (Linux) / `strip -x` (macOS) in the `build-nodejs` job. Combined with the upstream staticlib shrink, the Linux `.node` is expected to drop from 17 MB to ~7 MB.
+- **Drop sourcemaps from the npm tarball** — `js/tsconfig.json` sets `declarationMap: false` + `sourceMap: false` for the published build. File count falls from 211 → 107 (removes 104 `.js.map` / `.d.ts.map` files). `.d.ts.map` was never useful to consumers; `.js.map` is moot without TS sources, which we don't ship.
+- **Fix crate sdist leak (pulled in 47 unrelated files)** — Cargo's `include` uses gitignore-style globs, so the bare `"README.md"` entry was matching every README.md recursively, including 27 `js/node_modules/*/README.md` dependency READMEs and 20 subdirectory READMEs. Anchored all patterns with a leading `/` — sdist file count 308 → 264.
+- **Tighten NuGet symbol package** — `EmbedAllSources` dropped from `true` to `false` in `csharp/PdfOxide/PdfOxide.csproj`. SourceLink + the embedded PDB already serve sources on demand from the git SHA, so embedding every source file into the `.snupkg` was pure bloat. Added defensive `<None Remove="..\..\target\**\*.pdb" />` to prevent native PDBs from landing in `runtimes/` (nuget.org's snupkg validator rejects native PDBs).
+
 ## [0.3.27] - 2026-04-12
 
 ### Language Bindings

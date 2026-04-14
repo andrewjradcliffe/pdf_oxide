@@ -11,7 +11,20 @@ The fastest Go PDF library for text extraction, image extraction, and markdown c
 
 ```bash
 go get github.com/yfedoseev/pdf_oxide/go
+
+# One-time per machine: download the native FFI library
+go run github.com/yfedoseev/pdf_oxide/go/cmd/install@v0.3.31
+
+# Installer prints the CGO_* env vars to export — e.g.:
+export CGO_CFLAGS="-I$HOME/.pdf_oxide/v0.3.31/include"
+export CGO_LDFLAGS="$HOME/.pdf_oxide/v0.3.31/lib/linux_amd64/libpdf_oxide.a \
+  -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
 ```
+
+> **Why `go run ...install`?** Since v0.3.31 the native Rust staticlib is
+> fetched from GitHub Release assets on demand instead of being committed to
+> git (previously ~310 MB per release). See `go/lib/README.md` for details
+> including the `//go:generate` and `-tags pdf_oxide_dev` flows.
 
 ```go
 package main
@@ -43,7 +56,7 @@ func main() {
 - **Permissive license** — MIT / Apache-2.0 — use freely in commercial and closed-source projects
 - **Pure Rust core** — Memory-safe, panic-free, no C dependencies beyond CGo glue
 - **Idiomatic Go** — Sentinel errors with `errors.Is`, `defer doc.Close()`, slices instead of opaque iterators, thread-safe concurrent reads
-- **No build step** — Pre-built native libraries for Linux, macOS, and Windows (x64 and ARM64) ship with the module. CGo is required (`CGO_ENABLED=1`, the default), but no Rust toolchain is needed.
+- **No Rust toolchain required** — Pre-built native libraries for Linux, macOS, and Windows (x64, plus Linux/macOS ARM64) are fetched from GitHub Releases by a one-line installer. CGo is required (`CGO_ENABLED=1`, the default).
 
 ## Performance
 

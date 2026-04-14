@@ -19,7 +19,7 @@
     <!-- NuGet Package Configuration -->
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
     <PackageId>PdfOxide</PackageId>
-    <Version>0.3.30</Version>
+    <Version>0.3.31</Version>
     <Title>PdfOxide</Title>
     <Authors>pdf_oxide Contributors</Authors>
     <Company>pdf_oxide Project</Company>
@@ -71,10 +71,15 @@ v0.3.30 — NativeAOT + LibraryImport migration (#333) + v0.3.30 shipping fixes
     <PackageTags>pdf;text-extraction;pdf-creation;pdf-editing;rust;pinvoke;ffi;interop;pdf-processing</PackageTags>
     <Category>Data;Text Processing</Category>
 
-    <!-- Symbol Package Configuration -->
+    <!-- Symbol Package Configuration.
+         EmbedAllSources=false (was true) — embedding every Rust/C# source
+         into the .snupkg bloats the symbol package with content that
+         SourceLink can serve on demand from GitHub. Disabling it shrinks the
+         snupkg substantially without losing step-into debugging (SourceLink
+         + the embedded PDB still resolve sources from the git SHA). -->
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-    <EmbedAllSources>true</EmbedAllSources>
+    <EmbedAllSources>false</EmbedAllSources>
 
     <!-- Documentation and Code Analysis -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -118,6 +123,14 @@ v0.3.30 — NativeAOT + LibraryImport migration (#333) + v0.3.30 shipping fixes
   <!-- Package README: the canonical C# binding README lives one level up in csharp/ -->
   <ItemGroup>
     <None Include="../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- Defensively exclude any native PDB files that might land in runtimes/
+       dirs during local builds. nuget.org's .snupkg validator rejects native
+       PDBs (only portable managed PDBs are allowed), so leaving them in
+       would break `dotnet nuget push`. -->
+  <ItemGroup>
+    <None Remove="..\..\target\**\*.pdb" />
   </ItemGroup>
 
   <!-- Include native libraries in NuGet package -->

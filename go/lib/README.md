@@ -1,67 +1,57 @@
-# Native Libraries
+# Native Libraries — installed on demand
 
-This directory contains prebuilt native `pdf_oxide` libraries that are
-statically linked into Go binaries at build time (see [#334]). They are
-populated by the release CI pipeline and committed to the Go module so that
-`go get github.com/yfedoseev/pdf_oxide/go` works without requiring users to
-build Rust themselves.
+Starting with **v0.3.31**, native `pdf_oxide` libraries are no longer
+committed to this module. Instead they're downloaded from GitHub Releases
+on demand by a small Go installer, which removes ~310 MB of per-release
+repository bloat (Rust staticlibs for 6 platforms).
 
-Starting with **v0.3.30**, each platform ships a static archive
-(`libpdf_oxide.a`) rather than a shared object. CGo links the archive
-directly via `#cgo ... LDFLAGS` (see `go/pdf_oxide.go`), so the resulting Go
-binary is self-contained — no `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` / `PATH`
-configuration required at runtime.
-
-## Directory Structure
-
-```
-lib/
-  linux_amd64/    libpdf_oxide.a     (staticlib)
-  linux_arm64/    libpdf_oxide.a     (staticlib)
-  darwin_amd64/   libpdf_oxide.a     (staticlib)
-  darwin_arm64/   libpdf_oxide.a     (staticlib)
-  windows_amd64/  libpdf_oxide.a     (staticlib, MinGW-compatible)
-  windows_arm64/  pdf_oxide.dll      (dynamic — see note below)
-```
-
-### Windows ARM64 caveat
-
-Windows ARM64 temporarily remains on dynamic linking in v0.3.30 because
-Rust's `aarch64-pc-windows-gnullvm` target is Tier 3 and not yet production-
-ready for our CI. Go binaries built for Windows ARM64 must still ship
-`pdf_oxide.dll` alongside the executable. Tracked as a follow-up; Linux,
-macOS, and Windows x64 are all fully self-contained.
-
-## Building from source
-
-If you prefer to build the native library yourself:
+## Install (one-time per machine)
 
 ```bash
-# From the pdf_oxide root directory
-cargo build --release --lib
-cp target/release/libpdf_oxide.a go/lib/linux_amd64/     # Linux x64
-cp target/release/libpdf_oxide.a go/lib/darwin_arm64/    # macOS (Apple Silicon)
-
-# Windows x64 (cross-compile from Linux with mingw-w64):
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --lib --target x86_64-pc-windows-gnu
-cp target/x86_64-pc-windows-gnu/release/libpdf_oxide.a go/lib/windows_amd64/
+go run github.com/yfedoseev/pdf_oxide/go/cmd/install@v0.3.31
 ```
 
-## Regenerating the CGo system-library list
+The installer detects `GOOS`/`GOARCH`, downloads the matching asset from
+`https://github.com/yfedoseev/pdf_oxide/releases/download/v0.3.31/…`, and
+extracts `libpdf_oxide.a` + `pdf_oxide.h` into `~/.pdf_oxide/v0.3.31/`.
 
-Rust's `staticlib` output doesn't embed references to its own platform-
-specific system dependencies (libm, pthread, Security framework, bcrypt,
-…); those must be listed explicitly in each `#cgo ... LDFLAGS` directive in
-`go/pdf_oxide.go`. If a dependency bump introduces a new linker symbol, get
-the authoritative list from rustc:
+It then prints the `CGO_CFLAGS` / `CGO_LDFLAGS` you need to export:
+
+```
+export CGO_CFLAGS="-I$HOME/.pdf_oxide/v0.3.31/include"
+export CGO_LDFLAGS="$HOME/.pdf_oxide/v0.3.31/lib/linux_amd64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
+```
+
+After that, `go build` / `go test` work normally.
+
+## Alternative: `go generate`
+
+If you prefer to wire installation into your own project's build, add this
+to any `.go` file in your project:
+
+```go
+//go:generate go run github.com/yfedoseev/pdf_oxide/go/cmd/install@v0.3.31 --write-flags=.
+```
+
+Running `go generate ./...` then drops a `cgo_flags.go` next to your
+`//go:generate` directive with the right `#cgo LDFLAGS` baked in for your
+machine's install path. That file is per-machine — add it to `.gitignore`.
+
+## Development / monorepo builds
+
+If you're working inside the `pdf_oxide` monorepo and have already run
+`cargo build --release --lib`, build the Go module with the `pdf_oxide_dev`
+tag to use the workspace `target/` path directly:
 
 ```bash
-cargo rustc --release --lib --target x86_64-unknown-linux-gnu \
-  -- --print native-static-libs
+cd go && go build -tags pdf_oxide_dev ./...
 ```
 
-and copy the reported `-l…` flags into the matching `#cgo linux,amd64
-LDFLAGS` line.
+No installer needed in that mode.
 
-[#334]: https://github.com/yfedoseev/pdf_oxide/issues/334
+## Windows ARM64
+
+Windows ARM64 currently ships a dynamic `pdf_oxide.dll` (not a staticlib)
+because Rust's `aarch64-pc-windows-gnullvm` target is still Tier 3. Go
+binaries for this platform must ship `pdf_oxide.dll` alongside the
+executable at runtime.
