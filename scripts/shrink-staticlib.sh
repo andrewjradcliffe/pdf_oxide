@@ -31,11 +31,15 @@ case "$(uname -s)" in
     # GNU binutils path. objcopy handles archives: it iterates members and
     # applies the operation to each, then rewrites the archive in place.
     if command -v objcopy >/dev/null 2>&1; then
+      # llvm-objcopy rejects "same input and output" on some distros; write to
+      # a sibling tmp file and move it into place atomically.
+      tmp="${LIB}.shrink.tmp"
       objcopy \
         --remove-section=.llvmbc \
         --remove-section=.llvmcmd \
         --strip-debug \
-        "$LIB" "$LIB"
+        "$LIB" "$tmp"
+      mv "$tmp" "$LIB"
     else
       echo "shrink-staticlib: objcopy not available; skipping $LIB" >&2
     fi

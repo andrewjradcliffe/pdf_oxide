@@ -227,10 +227,12 @@ impl PdfImage {
             // uniformly. CMYK JPEGs (4-channel ColorSpace such as DeviceCMYK
             // or ICCBased N=4) must be decoded and re-encoded as RGB because
             // most viewers either fail to open CMYK JPEGs or display them
-            // with inverted or washed-out colors. The JPEG decoder already
-            // handles the Adobe APP14 YCCK marker during load, so the
-            // DynamicImage we get back is the correct RGB representation
-            // (naive CMYK→RGB; full ICC profile handling is a follow-up).
+            // with inverted or washed-out colors. `decode_cmyk_jpeg_to_rgb`
+            // pulls CMYK samples via `jpeg-decoder`, inspects the APP14
+            // Adobe marker to detect the inverted-channel convention
+            // Photoshop / InDesign / WPS write, inverts when present, then
+            // does a naive CMYK→RGB conversion (full ICC profile handling
+            // is a follow-up).
             ImageData::Jpeg(jpeg_data) => {
                 if self.color_space.components() == 4 {
                     let rgb = decode_cmyk_jpeg_to_rgb(jpeg_data)?;

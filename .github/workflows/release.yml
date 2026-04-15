@@ -510,10 +510,16 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          case "${{ matrix.os }}" in
-            ubuntu-latest) asset=pdf_oxide-go-ffi-linux-amd64.tar.gz;   goarch_dir=linux_amd64 ;;
-            macos-latest)  asset=pdf_oxide-go-ffi-darwin-arm64.tar.gz;  goarch_dir=darwin_arm64 ;;
-            *) echo "unsupported matrix os: ${{ matrix.os }}" && exit 1 ;;
+          # Detect the runner architecture — macos-latest transitioned
+          # from x86_64 to arm64 once, and may flip again. Pick the asset
+          # at runtime so the verification gate tracks the actual runner.
+          arch=$(uname -m)
+          case "${{ matrix.os }}-$arch" in
+            ubuntu-latest-x86_64)  asset=pdf_oxide-go-ffi-linux-amd64.tar.gz;  goarch_dir=linux_amd64  ;;
+            ubuntu-latest-aarch64) asset=pdf_oxide-go-ffi-linux-arm64.tar.gz;  goarch_dir=linux_arm64  ;;
+            macos-latest-arm64)    asset=pdf_oxide-go-ffi-darwin-arm64.tar.gz; goarch_dir=darwin_arm64 ;;
+            macos-latest-x86_64)   asset=pdf_oxide-go-ffi-darwin-amd64.tar.gz; goarch_dir=darwin_amd64 ;;
+            *) echo "unsupported matrix os/arch: ${{ matrix.os }} / $arch" && exit 1 ;;
           esac
 
           # Checksum gate — this is the same check the Go installer performs

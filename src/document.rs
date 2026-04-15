@@ -1084,12 +1084,12 @@ impl PdfDocument {
     fn recover_from_object_streams(&self) {
         use crate::objstm::parse_object_stream_with_decryption;
 
-        let mut done = self.objstm_recovery_done.lock().unwrap();
-        if *done {
-            return;
+        {
+            let done = self.objstm_recovery_done.lock().unwrap();
+            if *done {
+                return;
+            }
         }
-        *done = true;
-        drop(done);
 
         log::debug!("Sweeping object streams to recover xref-flagged-free objects");
 
@@ -1101,6 +1101,10 @@ impl PdfDocument {
         // search for `N G obj ... /Type /ObjStm` finds every object stream
         // the producer actually wrote, independent of how the xref
         // describes them.
+        //
+        // Only flip `objstm_recovery_done` after we finish the scan+parse
+        // pass; a transient seek/read failure should leave the flag unset
+        // so a later retry can still attempt recovery.
         let file_bytes = {
             let mut r = self.reader.lock().unwrap();
             if r.seek(SeekFrom::Start(0)).is_err() {
@@ -1171,6 +1175,8 @@ impl PdfDocument {
             objstms_found,
             recovered
         );
+
+        *self.objstm_recovery_done.lock().unwrap() = true;
     }
 
     /// Load an object by its reference.
