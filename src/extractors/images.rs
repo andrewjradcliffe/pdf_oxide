@@ -871,7 +871,19 @@ fn expand_indexed_to_rgb(
     let w = width as usize;
     let h = height as usize;
     let n = base_fmt.bytes_per_pixel();
-    let bpc = bpc.max(1);
+
+    // ISO 32000-2 §8.9.5.1 mandates bpc ∈ {1, 2, 4, 8} for Indexed color
+    // spaces. Anything else (0, 3, 5, 6, 7, 9, 12, 16, …) used to be
+    // accepted silently — bpc=0 was coerced to 1 and any other value fell
+    // through the `read_index` `_ => 0` arm, producing a solid palette-
+    // entry-0 image with no error. Reject up front so malformed input is
+    // surfaced instead of decoded into nonsense pixels.
+    if !matches!(bpc, 1 | 2 | 4 | 8) {
+        return Err(Error::Image(format!(
+            "Indexed image has invalid /BitsPerComponent {bpc} \
+             (PDF spec requires 1, 2, 4, or 8)"
+        )));
+    }
 
     // Checked arithmetic for `bytes_per_row = ceil(w * bpc / 8)`.
     let bytes_per_row = w
@@ -944,7 +956,10 @@ fn expand_indexed_to_rgb(
                 let shift = 7 - (x % 8);
                 ((b >> shift) & 0x01) as usize
             },
-            _ => 0,
+            // Unreachable: bpc is validated to be in {1, 2, 4, 8} above
+            // before the closure is called, so this arm only exists to
+            // satisfy exhaustiveness on `u8`.
+            _ => unreachable!("bpc validated to {{1,2,4,8}} before read_index"),
         }
     };
 
@@ -1385,5 +1400,47 @@ mod indexed_tests {
             err.contains("guard limit") || err.contains("exceeds"),
             "expected output-size guard error, got: {err}"
         );
+    }
+
+    // ---- #338: bpc validation per ISO 32000-2 §8.9.5.1 ----
+
+    #[test]
+    fn expand_indexed_rejects_bpc_zero() {
+        // bpc = 0 used to be coerced to 1 by `bpc.max(1)`, silently
+        // accepting a malformed PDF. Now it must be rejected.
+        let palette = vec![0, 0, 0, 255, 0, 0];
+        let raw = vec![0xFF];
+        let result = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 1, 1, 0);
+        assert!(result.is_err(), "bpc=0 must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("BitsPerComponent") || err.contains("bpc"),
+            "expected bpc error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_indexed_rejects_unsupported_bpc() {
+        // 3, 5, 6, 7, 9, 12, 16, … are all invalid for Indexed. Previously
+        // the `_ => 0` arm in `read_index` silently mapped every pixel to
+        // palette entry 0, returning a solid-color image. Now they're
+        // rejected up front.
+        let palette = vec![0, 0, 0, 255, 0, 0];
+        let raw = vec![0xFF];
+        for bpc in [3u8, 5, 6, 7, 9, 12, 16] {
+            let result = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 1, 1, bpc);
+            assert!(result.is_err(), "bpc={bpc} must be rejected");
+        }
+    }
+
+    #[test]
+    fn expand_indexed_accepts_all_spec_bpc_values() {
+        // Sanity: 1, 2, 4, 8 must still all work.
+        let palette = vec![0, 0, 0, 255, 0, 0, 10, 20, 30, 40, 50, 60];
+        let raw = vec![0xFF];
+        for bpc in [1u8, 2, 4, 8] {
+            let result = expand_indexed_to_rgb(&raw, &palette, PixelFormat::RGB, 1, 1, bpc);
+            assert!(result.is_ok(), "bpc={bpc} must be accepted, got {result:?}");
+        }
     }
 }
