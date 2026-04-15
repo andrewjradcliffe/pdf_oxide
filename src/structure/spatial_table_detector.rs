@@ -177,6 +177,7 @@ fn is_valid_table(table: &ExtractedTable) -> bool {
         return false;
     }
 
+
     // Narrow false-positive signature: a 2-column "table" emitted from
     // label/value rows with faint cell backgrounds, where the right-hand
     // value wraps onto a continuation line. The continuation row has an
@@ -196,6 +197,40 @@ fn is_valid_table(table: &ExtractedTable) -> bool {
     }
 
     true
+}
+
+/// Additional gate applied to SPATIAL-only table detection (no explicit
+/// lines/rulings): reject "word-per-cell" false positives where a
+/// paragraph's visual gaps accidentally align into columns.
+///
+/// Signature: >=5 columns AND >70% of non-empty cells contain only a
+/// single word. Real data tables have multi-word labels, numeric values,
+/// or dense content; a paragraph mis-read as a table reads as a sentence
+/// when the cells are concatenated.
+///
+/// This gate is NOT applied when rulings/lines define the table — in
+/// that case the author explicitly marked the structure and we trust it
+/// even if cells are single-character (census forms, sparse grids).
+fn passes_spatial_quality_gate(table: &ExtractedTable) -> bool {
+    if table.col_count < 5 {
+        return true;
+    }
+    let non_empty: Vec<&str> = table
+        .rows
+        .iter()
+        .flat_map(|r| &r.cells)
+        .map(|c| c.text.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return true;
+    }
+    let single_word_count = non_empty
+        .iter()
+        .filter(|t| t.split_whitespace().count() <= 1)
+        .count();
+    let ratio = single_word_count as f32 / non_empty.len() as f32;
+    ratio <= 0.7
 }
 
 /// Detect page column regions from an X-projection histogram of text spans.
@@ -486,7 +521,7 @@ pub fn detect_tables_from_spans(
     }
 
     let table = grid_to_extracted_table(&grid, spans, None);
-    if !is_valid_table(&table) {
+    if !is_valid_table(&table) || !passes_spatial_quality_gate(&table) {
         return Vec::new();
     }
     vec![table]
@@ -1870,8 +1905,14 @@ fn split_rows_by_text_positions(
                     Some(b)
                 };
 
+                let cell_spans = matching_indices
+                    .iter()
+                    .filter_map(|&idx| spans.get(idx).cloned())
+                    .collect::<Vec<_>>();
+
                 new_row.cells.push(TableCell {
                     text: cell_text,
+                    spans: cell_spans,
                     colspan: 1,
                     rowspan: 1,
                     mcids,
@@ -2173,7 +2214,7 @@ fn assign_spans_to_intersection_grid(
             if !grid_has_cell[ri][ci] {
                 // Still emit empty cell so column count stays consistent.
                 row.cells.push(TableCell {
-                    text: String::new(),
+                    text: String::new(), spans: Vec::new(),
                     colspan: 1,
                     rowspan: 1,
                     mcids: Vec::new(),
@@ -2199,8 +2240,14 @@ fn assign_spans_to_intersection_grid(
                 xs[ci + 1] - xs[ci],
                 ys[ri + 1] - ys[ri],
             );
+            let cell_spans = grid_spans[ri][ci]
+                .iter()
+                .filter_map(|&idx| spans.get(idx).cloned())
+                .collect::<Vec<_>>();
+
             row.cells.push(TableCell {
                 text: cell_text,
+                spans: cell_spans,
                 colspan: 1,
                 rowspan: 1,
                 mcids,
@@ -2573,7 +2620,7 @@ fn merge_vertically_adjacent_tables(tables: &mut Vec<ExtractedTable>) {
                 for row in &mut prev.rows {
                     for _ in 0..pad {
                         row.cells.push(TableCell {
-                            text: String::new(),
+                            text: String::new(), spans: Vec::new(),
                             colspan: 1,
                             rowspan: 1,
                             mcids: Vec::new(),
@@ -2591,7 +2638,7 @@ fn merge_vertically_adjacent_tables(tables: &mut Vec<ExtractedTable>) {
                 for row in &mut incoming_rows {
                     for _ in 0..pad {
                         row.cells.push(TableCell {
-                            text: String::new(),
+                            text: String::new(), spans: Vec::new(),
                             colspan: 1,
                             rowspan: 1,
                             mcids: Vec::new(),
@@ -2776,6 +2823,9 @@ pub fn detect_tables_with_lines(
     if allow_text_fallback {
         let text_candidates = detect_tables_from_spans_column_aware(spans, config);
         for text_table in text_candidates {
+            if !passes_spatial_quality_gate(&text_table) {
+                continue;
+            }
             if let Some(text_bbox) = text_table.bbox {
                 let overlaps = final_tables.iter().any(|t| {
                     if let Some(line_bbox) = t.bbox {
@@ -2826,8 +2876,14 @@ fn grid_to_extracted_table(
                 .iter()
                 .filter_map(|&idx| spans.get(idx).and_then(|s| s.mcid))
                 .collect::<Vec<_>>();
+            let cell_spans = cell_span_indices
+                .iter()
+                .filter_map(|&idx| spans.get(idx).cloned())
+                .collect::<Vec<_>>();
+
             table_row.cells.push(TableCell {
                 text: cell_text,
+                spans: cell_spans,
                 colspan: mi.colspan.min((num_cols - col_idx) as u32),
                 rowspan: mi.rowspan.min((num_rows - row_idx) as u32),
                 mcids,
@@ -3768,6 +3824,7 @@ mod tests {
 
         let make_cell = |text: &str| TableCell {
             text: text.to_string(),
+            spans: Vec::new(),
             colspan: 1,
             rowspan: 1,
             mcids: Vec::new(),
@@ -3852,6 +3909,7 @@ mod tests {
 
         let make_cell = |text: &str| TableCell {
             text: text.to_string(),
+            spans: Vec::new(),
             colspan: 1,
             rowspan: 1,
             mcids: Vec::new(),
@@ -4131,6 +4189,7 @@ mod tests {
                 } else {
                     String::new()
                 },
+                spans: Vec::new(),
                 colspan: 1,
                 rowspan: 1,
                 mcids: vec![],
@@ -4149,6 +4208,7 @@ mod tests {
                     } else {
                         String::new()
                     },
+                    spans: Vec::new(),
                     colspan: 1,
                     rowspan: 1,
                     mcids: vec![],
@@ -4177,7 +4237,7 @@ mod tests {
             let mut row = TableRow::new(r == 0);
             for c in 0..col_count {
                 row.cells.push(TableCell {
-                    text: format!("R{r}C{c}"),
+                    text: format!("R{r}C{c}"), spans: Vec::new(),
                     colspan: 1,
                     rowspan: 1,
                     mcids: vec![],
@@ -4219,7 +4279,7 @@ mod tests {
         for (label, value) in &rows_data {
             let mut row = TableRow::new(false);
             row.cells.push(TableCell {
-                text: label.to_string(),
+                text: label.to_string(), spans: Vec::new(),
                 colspan: 1,
                 rowspan: 1,
                 mcids: vec![],
@@ -4227,7 +4287,7 @@ mod tests {
                 is_header: false,
             });
             row.cells.push(TableCell {
-                text: value.to_string(),
+                text: value.to_string(), spans: Vec::new(),
                 colspan: 1,
                 rowspan: 1,
                 mcids: vec![],
@@ -4260,7 +4320,7 @@ mod tests {
         for i in 0..6 {
             let mut row = TableRow::new(i == 0);
             row.cells.push(TableCell {
-                text: format!("Key {i}"),
+                text: format!("Key {i}"), spans: Vec::new(),
                 colspan: 1,
                 rowspan: 1,
                 mcids: vec![],
@@ -4268,7 +4328,7 @@ mod tests {
                 is_header: i == 0,
             });
             row.cells.push(TableCell {
-                text: format!("Value {i}"),
+                text: format!("Value {i}"), spans: Vec::new(),
                 colspan: 1,
                 rowspan: 1,
                 mcids: vec![],
@@ -4304,7 +4364,7 @@ mod tests {
         for (label, value) in &rows_data {
             let mut row = TableRow::new(false);
             row.cells.push(TableCell {
-                text: label.to_string(),
+                text: label.to_string(), spans: Vec::new(),
                 colspan: 1,
                 rowspan: 1,
                 mcids: vec![],
@@ -4312,7 +4372,7 @@ mod tests {
                 is_header: false,
             });
             row.cells.push(TableCell {
-                text: value.to_string(),
+                text: value.to_string(), spans: Vec::new(),
                 colspan: 1,
                 rowspan: 1,
                 mcids: vec![],
@@ -4413,7 +4473,7 @@ mod tests {
             rows: vec![TableRow {
                 cells: vec![
                     TableCell {
-                        text: "A".into(),
+                        text: "A".into(), spans: Vec::new(),
                         colspan: 1,
                         rowspan: 1,
                         mcids: vec![],
@@ -4421,7 +4481,7 @@ mod tests {
                         is_header: false,
                     },
                     TableCell {
-                        text: "B".into(),
+                        text: "B".into(), spans: Vec::new(),
                         colspan: 1,
                         rowspan: 1,
                         mcids: vec![],
@@ -4429,7 +4489,7 @@ mod tests {
                         is_header: false,
                     },
                     TableCell {
-                        text: "C".into(),
+                        text: "C".into(), spans: Vec::new(),
                         colspan: 1,
                         rowspan: 1,
                         mcids: vec![],
@@ -4447,7 +4507,7 @@ mod tests {
             rows: vec![TableRow {
                 cells: vec![
                     TableCell {
-                        text: "D".into(),
+                        text: "D".into(), spans: Vec::new(),
                         colspan: 1,
                         rowspan: 1,
                         mcids: vec![],
@@ -4455,7 +4515,7 @@ mod tests {
                         is_header: false,
                     },
                     TableCell {
-                        text: "E".into(),
+                        text: "E".into(), spans: Vec::new(),
                         colspan: 1,
                         rowspan: 1,
                         mcids: vec![],
@@ -4463,7 +4523,7 @@ mod tests {
                         is_header: false,
                     },
                     TableCell {
-                        text: "F".into(),
+                        text: "F".into(), spans: Vec::new(),
                         colspan: 1,
                         rowspan: 1,
                         mcids: vec![],
@@ -4491,7 +4551,7 @@ mod tests {
         let table1 = ExtractedTable {
             rows: vec![TableRow {
                 cells: vec![TableCell {
-                    text: "A".into(),
+                    text: "A".into(), spans: Vec::new(),
                     colspan: 1,
                     rowspan: 1,
                     mcids: vec![],
@@ -4507,7 +4567,7 @@ mod tests {
         let table2 = ExtractedTable {
             rows: vec![TableRow {
                 cells: vec![TableCell {
-                    text: "B".into(),
+                    text: "B".into(), spans: Vec::new(),
                     colspan: 1,
                     rowspan: 1,
                     mcids: vec![],

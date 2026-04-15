@@ -2327,9 +2327,11 @@ impl FontInfo {
 
     /// Convert a character code to Unicode string.
     ///
-    /// This method looks up the character code in the font's encoding tables
-    /// (ToUnicode CMap, built-in encoding, or glyph name mappings) and returns
-    /// the corresponding Unicode string if found.
+    /// Returns the faithful Unicode mapping per PDF Spec §9.10.2. Ligature
+    /// characters (U+FB00–FB06) are preserved here; expansion into component
+    /// letters is done by the text pipeline via `LigatureDecisionMaker`, which
+    /// inspects surrounding context (neighboring chars, word boundaries) to
+    /// decide whether to split — keeping font_dict a pure encoding layer.
     pub fn char_to_unicode(&self, char_code: u32) -> Option<String> {
         // char_code is now u32 to support 4-byte character codes (0x00000000-0xFFFFFFFF)
         // This is backward compatible - u16 values are automatically promoted to u32
@@ -2337,78 +2339,43 @@ impl FontInfo {
         // ==================================================================================
         // PRIORITY 1: ToUnicode CMap (PDF Spec Section 9.10.2, Method 1)
         // ==================================================================================
-        // "If the font dictionary contains a ToUnicode CMap, use that CMap to convert
-        // the character code to Unicode."
-        //
-        // QUALITY HEURISTIC: Skip U+FFFD (replacement character) mappings.
-        // Some PDF authoring tools write U+FFFD in ToUnicode CMaps when they can't
-        // determine the correct Unicode value. This is effectively saying "I don't know".
-        // We treat U+FFFD mappings the same as missing entries and fall back to Priority 2.
-        //
-        // This matches industry practice (PyMuPDF) and fixes 57 PDFs (16%) with en-dash issues.
-        // See ENDASH_ISSUE_ROOT_CAUSE.md for full analysis.
-        //
-        // Phase 5.1: With lazy loading, the CMap is parsed on first access here
         if let Some(lazy_cmap) = &self.to_unicode {
-            // Get the parsed CMap - this triggers lazy parsing on first access
             if let Some(cmap) = lazy_cmap.get() {
                 if let Some(unicode) = cmap.get(&char_code) {
-                    // Skip U+FFFD mappings - treat as missing entry
                     if unicode == "\u{FFFD}" {
                         log::warn!(
                             "ToUnicode CMap has U+FFFD for code 0x{:02X} in font '{}' - falling back to Priority 2",
-                            char_code,
-                            self.base_font
+                            char_code, self.base_font
                         );
-                        // Fall through to Priority 2 (predefined encodings)
                     } else if unicode
                         .chars()
                         .all(|c| c.is_control() && c != '\t' && c != '\n' && c != '\r')
                         && !unicode.is_empty()
                     {
-                        // ToUnicode mapped to control characters (U+0000-U+001F excluding
-                        // whitespace). This is a broken CMap — fall through to glyph name
-                        // resolution or other fallbacks.
                         log::warn!(
                             "ToUnicode CMap maps code 0x{:04X} to control char(s) in font '{}' - falling back",
-                            char_code,
-                            self.base_font
+                            char_code, self.base_font
                         );
-                        // Fall through to Priority 2
                     } else {
-                        log::debug!(
-                            "ToUnicode CMap: font='{}' code=0x{:02X} → '{}'",
-                            self.base_font,
-                            char_code,
-                            unicode
-                        );
                         return Some(unicode.clone());
                     }
                 } else {
-                    // DIAGNOSTIC: Log when ToUnicode CMap exists but lookup fails
-                    log::warn!(
+                    log::debug!(
                         "ToUnicode CMap MISS: font='{}' subtype='{}' code=0x{:04X} (cmap has {} entries)",
-                        self.base_font,
-                        self.subtype,
-                        char_code,
-                        cmap.len()
+                        self.base_font, self.subtype, char_code, cmap.len()
                     );
                 }
             } else {
-                // Lazy CMap parsing failed
                 log::warn!(
                     "Failed to parse lazy CMap for font '{}' - will fall back to Priority 2",
                     self.base_font
                 );
             }
-        } else {
-            // DIAGNOSTIC: Log when ToUnicode CMap is missing
-            if self.subtype == "Type0" {
-                log::warn!(
-                    "Type0 font '{}' missing ToUnicode CMap! This will cause character scrambling.",
-                    self.base_font
-                );
-            }
+        } else if self.subtype == "Type0" {
+            log::debug!(
+                "Type0 font '{}' missing ToUnicode CMap - will fall back to Priority 2",
+                self.base_font
+            );
         }
 
         // ==================================================================================
@@ -2578,33 +2545,6 @@ impl FontInfo {
                     return Some(unicode_char.to_string());
                 }
             }
-        }
-
-        // ==================================================================================
-        // PRIORITY 1.5: Ligature Expansion (Unicode Ligature Characters)
-        // ==================================================================================
-        // Check if this character code is a Unicode ligature character (U+FB00-U+FB04).
-        // Ligatures should be expanded to their component characters for better text extraction.
-        //
-        // This is placed early (after ToUnicode but before other fallbacks) because:
-        // - Some PDFs may map ligature character codes through ToUnicode CMaps
-        // - If no ToUnicode mapping exists, we still want to expand ligatures
-        // - Ligature expansion is a Unicode standard (ISO 32000-1:2008 Section 9.10)
-        //
-        // Ligatures supported:
-        // - U+FB00: ff (LATIN SMALL LIGATURE FF)
-        // - U+FB01: fi (LATIN SMALL LIGATURE FI)
-        // - U+FB02: fl (LATIN SMALL LIGATURE FL)
-        // - U+FB03: ffi (LATIN SMALL LIGATURE FFI)
-        // - U+FB04: ffl (LATIN SMALL LIGATURE FFL)
-        if let Some(expanded) = expand_ligature_char_code(char_code as u16) {
-            log::debug!(
-                "Ligature expansion: font='{}' code=0x{:04X} → '{}'",
-                self.base_font,
-                char_code,
-                expanded
-            );
-            return Some(expanded.to_string());
         }
 
         // ==================================================================================
@@ -2924,6 +2864,29 @@ impl FontInfo {
             self.is_symbolic(),
             self.encoding
         );
+
+        // ==================================================================================
+        // PRIORITY 6: Unicode Ligature Fallback
+        // ==================================================================================
+        // If no encoding mapping was found and the raw character code falls
+        // in the Unicode ligature block (U+FB00-U+FB06), decompose into the
+        // component letters. This is a pure-fallback codepath — when no
+        // font data identifies the glyph, standard ligature decomposition
+        // is the safest recovery. LaTeX and scientific PDF producers emit
+        // these codes directly.
+        let ligature_components = match char_code {
+            0xFB00 => Some("ff"),
+            0xFB01 => Some("fi"),
+            0xFB02 => Some("fl"),
+            0xFB03 => Some("ffi"),
+            0xFB04 => Some("ffl"),
+            0xFB05 | 0xFB06 => Some("st"),
+            _ => None,
+        };
+        if let Some(s) = ligature_components {
+            return Some(s.to_string());
+        }
+
         None
     }
 
@@ -3466,25 +3429,6 @@ fn expand_ligature_char(c: char) -> Option<&'static str> {
 /// The expanded string if `char_code` is a ligature, None otherwise.
 ///
 /// # Examples
-///
-/// ```ignore
-/// assert_eq!(FontInfo::expand_ligature_char_code(0xFB01), Some("fi"));
-/// assert_eq!(FontInfo::expand_ligature_char_code(0xFB02), Some("fl"));
-/// assert_eq!(FontInfo::expand_ligature_char_code(0x0041), None); // 'A'
-/// ```
-fn expand_ligature_char_code(char_code: u16) -> Option<&'static str> {
-    match char_code {
-        0xFB00 => Some("ff"),  // LATIN SMALL LIGATURE FF
-        0xFB01 => Some("fi"),  // LATIN SMALL LIGATURE FI
-        0xFB02 => Some("fl"),  // LATIN SMALL LIGATURE FL
-        0xFB03 => Some("ffi"), // LATIN SMALL LIGATURE FFI
-        0xFB04 => Some("ffl"), // LATIN SMALL LIGATURE FFL
-        0xFB05 => Some("st"),  // LATIN SMALL LIGATURE LONG S T
-        0xFB06 => Some("st"),  // LATIN SMALL LIGATURE ST
-        _ => None,
-    }
-}
-
 /// Look up a character in the Adobe Symbol font encoding.
 ///
 /// This function implements the Symbol font encoding table as defined in
@@ -6218,23 +6162,6 @@ mod tests {
     }
 
     // =========================================================================
-    // expand_ligature_char_code
-    // =========================================================================
-
-    #[test]
-    fn test_expand_ligature_char_code_all_variants() {
-        assert_eq!(expand_ligature_char_code(0xFB00), Some("ff"));
-        assert_eq!(expand_ligature_char_code(0xFB01), Some("fi"));
-        assert_eq!(expand_ligature_char_code(0xFB02), Some("fl"));
-        assert_eq!(expand_ligature_char_code(0xFB03), Some("ffi"));
-        assert_eq!(expand_ligature_char_code(0xFB04), Some("ffl"));
-        assert_eq!(expand_ligature_char_code(0xFB05), Some("st"));
-        assert_eq!(expand_ligature_char_code(0xFB06), Some("st"));
-        assert_eq!(expand_ligature_char_code(0x0041), None);
-        assert_eq!(expand_ligature_char_code(0x0000), None);
-    }
-
-    // =========================================================================
     // get_glyph_width — simple font widths array
     // =========================================================================
 
@@ -6441,14 +6368,13 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_char_to_unicode_ligature_expansion() {
-        // Ligature codes come through when no ToUnicode and not in encoding
+    fn test_char_to_unicode_ligature_fallback_expansion() {
+        // When no encoding/ToUnicode mapping exists, Priority 6 falls back
+        // to standard Unicode ligature decomposition (U+FB00–FB06 → components).
         let font = make_font(|f| {
             f.encoding = Encoding::Standard("WinAnsiEncoding".to_string());
         });
-        // 0xFB01 (fi ligature) should expand to "fi"
         assert_eq!(font.char_to_unicode(0xFB01), Some("fi".to_string()));
-        // 0xFB03 (ffi ligature) should expand to "ffi"
         assert_eq!(font.char_to_unicode(0xFB03), Some("ffi".to_string()));
     }
 

@@ -231,6 +231,12 @@ pub struct PdfDocument {
     pub(crate) erase_regions: HashMap<usize, Vec<crate::geometry::Rect>>,
     /// Cached decompressed content stream for last accessed page.
     page_content_cache: Mutex<Option<(usize, std::sync::Arc<Vec<u8>>)>>,
+    /// Cached signatures of running headers/footers detected via cross-page
+    /// repetition. A span whose normalized text matches a signature and
+    /// sits near the top/bottom of the page is treated as an artifact.
+    /// Populated lazily on first access; `Some(set)` with an empty set
+    /// means detection ran and found nothing (vs `None` = not yet run).
+    running_artifact_signatures: Mutex<Option<std::collections::HashSet<String>>>,
 }
 
 // Compile-time verification that PdfDocument is Send + Sync.
@@ -571,6 +577,7 @@ impl PdfDocument {
             form_xobject_images_cache: Mutex::new(HashMap::new()),
             erase_regions: HashMap::new(),
             page_content_cache: Mutex::new(None),
+            running_artifact_signatures: Mutex::new(None),
         };
 
         // Initialize encryption immediately
@@ -3911,6 +3918,12 @@ impl PdfDocument {
                 }
             }
 
+            // Drop content marked /Artifact (PDF Spec ISO 32000-1:2008
+            // §14.8.2.2 — headers, footers, page numbers, decorations).
+            // Untagged-PDF running-header detection runs at document
+            // level and feeds the same artifact_type flag.
+            spans.retain(|s| s.artifact_type.is_none());
+
             // RTL correction
             Self::reverse_rtl_visual_order_runs(&mut spans);
 
@@ -6200,7 +6213,166 @@ impl PdfDocument {
             spans.retain(|span| !regions.iter().any(|r| r.intersects(&span.bbox)));
         }
 
+        // Mark running headers/footers (untagged-PDF heuristic). Spans whose
+        // normalized text recurs on >=50% of pages and sits near the top or
+        // bottom of the page are flagged as artifacts so downstream filters
+        // drop them.
+        self.mark_running_artifact_spans(page_index, &mut spans)?;
+
         Ok(spans)
+    }
+
+    /// Normalize a span's text for cross-page signature matching.
+    /// Collapses whitespace and replaces digit runs with `#` so that page
+    /// numbers ("Page 1 of 10", "Page 2 of 10") collapse to one signature.
+    fn normalize_artifact_signature(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut in_digit_run = false;
+        let mut last_was_space = true;
+        for c in text.chars() {
+            if c.is_ascii_digit() {
+                if !in_digit_run {
+                    out.push('#');
+                    in_digit_run = true;
+                }
+                last_was_space = false;
+            } else if c.is_whitespace() {
+                if !last_was_space {
+                    out.push(' ');
+                    last_was_space = true;
+                }
+                in_digit_run = false;
+            } else {
+                out.push(c);
+                last_was_space = false;
+                in_digit_run = false;
+            }
+        }
+        out.trim().to_string()
+    }
+
+    /// Ensure running-artifact signatures are computed (once) and return a
+    /// clone for matching. The computation scans every page's raw spans,
+    /// collects normalized text that appears in the top or bottom 12% of
+    /// the page, and keeps entries that recur on >=50% of pages.
+    fn ensure_running_artifact_signatures(
+        &mut self,
+    ) -> Result<std::collections::HashSet<String>> {
+        {
+            let guard = self.running_artifact_signatures.lock().unwrap();
+            if let Some(ref set) = *guard {
+                return Ok(set.clone());
+            }
+        }
+        let page_count = self.page_count()?;
+        if page_count < 2 {
+            let empty = std::collections::HashSet::new();
+            *self.running_artifact_signatures.lock().unwrap() = Some(empty.clone());
+            return Ok(empty);
+        }
+
+        let mut occurrences: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for pi in 0..page_count {
+            let spans = match self.extract_spans_raw(pi) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let page_height = match self.get_page_media_box(pi) {
+                Ok((_, _, _, h)) if h > 0.0 => h,
+                _ => continue,
+            };
+            let band = page_height * 0.12;
+            // Require that the page has CONTENT outside the top/bottom
+            // bands before counting band spans as candidate artifacts.
+            // Otherwise, a page consisting only of a title near the top
+            // would have its own title classified as a "running header"
+            // across all pages.
+            let has_body_content = spans.iter().any(|s| {
+                let t = s.text.trim();
+                if t.is_empty() {
+                    return false;
+                }
+                let top_of_span = s.bbox.y + s.bbox.height;
+                top_of_span <= page_height - band && s.bbox.y >= band
+            });
+            if !has_body_content {
+                continue;
+            }
+            // Collect per-page unique signatures to avoid over-counting
+            // repeated intra-page occurrences of the same string.
+            let mut seen_this_page = std::collections::HashSet::new();
+            for s in spans.iter() {
+                let trimmed = s.text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let near_bottom = s.bbox.y < band;
+                let near_top = s.bbox.y + s.bbox.height > page_height - band;
+                if !(near_top || near_bottom) {
+                    continue;
+                }
+                let sig = Self::normalize_artifact_signature(trimmed);
+                if sig.is_empty() || sig.chars().count() < 2 {
+                    continue;
+                }
+                seen_this_page.insert(sig);
+            }
+            for sig in seen_this_page {
+                *occurrences.entry(sig).or_insert(0) += 1;
+            }
+        }
+        let threshold = (page_count as f32 * 0.5).ceil() as usize;
+        let signatures: std::collections::HashSet<String> = occurrences
+            .into_iter()
+            .filter(|(_, count)| *count >= threshold.max(2))
+            .map(|(sig, _)| sig)
+            .collect();
+        *self.running_artifact_signatures.lock().unwrap() = Some(signatures.clone());
+        Ok(signatures)
+    }
+
+    /// Mark spans near the top/bottom of the page whose normalized text
+    /// matches a cached running-artifact signature by setting
+    /// `artifact_type` to Pagination.
+    fn mark_running_artifact_spans(
+        &mut self,
+        page_index: usize,
+        spans: &mut [crate::layout::TextSpan],
+    ) -> Result<()> {
+        let signatures = self.ensure_running_artifact_signatures()?;
+        if signatures.is_empty() {
+            return Ok(());
+        }
+        let (_, _, _, page_height) = match self.get_page_media_box(page_index) {
+            Ok(mb) => mb,
+            Err(_) => return Ok(()),
+        };
+        if page_height <= 0.0 {
+            return Ok(());
+        }
+        let band = page_height * 0.12;
+        for s in spans.iter_mut() {
+            if s.artifact_type.is_some() {
+                continue;
+            }
+            let near_bottom = s.bbox.y < band;
+            let near_top = s.bbox.y + s.bbox.height > page_height - band;
+            if !(near_top || near_bottom) {
+                continue;
+            }
+            let trimmed = s.text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let sig = Self::normalize_artifact_signature(trimmed);
+            if signatures.contains(&sig) {
+                s.artifact_type = Some(crate::extractors::text::ArtifactType::Pagination(
+                    crate::extractors::text::PaginationSubtype::Other,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Internal helper: extract raw (unsorted) text spans from a page.

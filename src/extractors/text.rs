@@ -3054,9 +3054,16 @@ impl TextExtractor {
                 }
             };
 
-            // COLUMN BOUNDARY CHECK: Don't merge spans with large gaps
-            // Use configured threshold to detect column separation
-            let large_gap_indicates_column = gap > self.merging_config.column_boundary_threshold_pt;
+            // Column-boundary gap, font-size-aware. The same 6pt gap is
+            // a column gutter at 11pt body text but normal word kerning
+            // at a 36pt title; use 0.5em as a floor above the configured
+            // absolute threshold.
+            let font_size_ref = current.font_size.max(span.font_size);
+            let column_threshold = self
+                .merging_config
+                .column_boundary_threshold_pt
+                .max(font_size_ref * 0.5);
+            let large_gap_indicates_column = gap > column_threshold;
 
             // SPLIT BOUNDARY CHECK: Respect boundaries from CamelCase splitting
             // If a span has split_boundary_before=true, it represents a word boundary
@@ -3064,28 +3071,55 @@ impl TextExtractor {
             // These should always be merged WITH a space, never without.
             let has_split_boundary = span.split_boundary_before;
 
-            // Font-change word boundary: when font name changes between
-            // adjacent spans on the same line, treat as a word boundary signal.
-            // Font changes mid-word are extremely rare in well-formed PDFs;
-            // font switches (e.g., regular→italic for product names) at word
-            // boundaries are the norm in LaTeX and other typesetting systems.
-            // Allow small negative gaps (overlaps up to 2pt) since span width
-            // computation may slightly overestimate, causing minor overlaps at
-            // font transitions even when visually there is whitespace.
-            let font_change_merge = same_line
-                && gap > -2.0
-                && gap < 3.0
-                && current.font_name != span.font_name
-                && !span.text.chars().all(|c| c.is_whitespace());
+            // Font identity: same base font AND same size AND same styling.
+            let is_same_font = current.font_name == span.font_name
+                && (current.font_size - span.font_size).abs() < 0.01
+                && current.font_weight == span.font_weight
+                && current.is_italic == span.is_italic;
+
+            // Cross-font word glue: same-baseline spans in different
+            // fonts/weights, tight gap (<0.25em), both sides alphabetic,
+            // and one side is a single character. Targets the drop-cap /
+            // single-letter-small-caps typography pattern where per-
+            // letter emphasis runs would corrupt proper nouns.
+            let cross_font_word_glue = !is_same_font
+                && same_line
+                && gap > -1.0
+                && gap < font_size_ref * 0.25
+                && !current.text.is_empty()
+                && !span.text.is_empty()
+                && current
+                    .text
+                    .chars()
+                    .last()
+                    .map_or(false, |c| c.is_alphabetic())
+                && span
+                    .text
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_alphabetic())
+                && (current.text.chars().count() == 1 || span.text.chars().count() == 1);
 
             // Merge threshold: Use configured values
             // Negative gaps: use severe_overlap_threshold_pt (default -0.5pt)
-            // Positive gaps: use 3pt default (0.25em * 12pt)
-            // However, if split_boundary_before=true, ALWAYS merge but insert space
+            // Positive gaps: use a threshold that allows for justified text but
+            // avoids merging across clear column boundaries.
+            // Same-font spans are merged more aggressively to reconstruct words.
+            let merge_threshold_pt = if is_same_font {
+                column_threshold.max(3.0)
+            } else {
+                // Different fonts: only merge if they are effectively overlapping
+                // to handle minor kerning/rounding issues, but generally keep separate.
+                0.5
+            };
+
             let should_merge = same_line
-                && (self.merging_config.severe_overlap_threshold_pt..3.0).contains(&gap)
+                && is_same_font
+                && (self.merging_config.severe_overlap_threshold_pt..merge_threshold_pt)
+                    .contains(&gap)
                 && !large_gap_indicates_column
-                || (same_line && has_split_boundary);
+                || (same_line && has_split_boundary)
+                || cross_font_word_glue;
 
             // DECIMAL VALUE MERGE: Some forms place integer and decimal parts
             // of dollar amounts in separate fixed-width boxes.
@@ -3093,8 +3127,6 @@ impl TextExtractor {
             // Detect this pattern: both spans are pure digits, the second is
             // exactly 1-2 digits (cents), same line, and gap < 2x font size.
             let decimal_merge = same_line
-                && !should_merge
-                && !font_change_merge
                 && gap > 0.0
                 && gap < current.font_size * 2.0
                 && !current.text.is_empty()
@@ -3115,30 +3147,10 @@ impl TextExtractor {
                 );
                 current.text.push('.');
                 current.text.push_str(&span.text);
-            } else if font_change_merge {
-                // Font change: merge with space between font runs
-                log::debug!(
-                    "Font change word boundary: '{}' ({}) + '{}' ({}) gap={:.2}pt",
-                    crate::utils::safe_suffix(&current.text, 10),
-                    current.font_name,
-                    crate::utils::safe_prefix(&span.text, 10),
-                    span.font_name,
-                    gap
-                );
-                // Insert space unless next span starts with punctuation
-                // (e.g., "Docling" + "," should NOT become "Docling ,")
-                let starts_with_punct = span.text.starts_with(|c: char| {
-                    matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"')
-                });
-                if !current.text.ends_with(' ') && !span.text.starts_with(' ') && !starts_with_punct
-                {
-                    current.text.push(' ');
-                }
+            } else if cross_font_word_glue {
+                // Mid-word font/weight change: concatenate without any space
+                // or space-heuristic — these are same-word character runs.
                 current.text.push_str(&span.text);
-                // Update font_name to the merged span's font so that subsequent
-                // font transitions (e.g., italic→regular for "[2]" after "PyTorch")
-                // are detected as font changes.
-                current.font_name = span.font_name.clone();
             } else if should_merge {
                 // PHASE 1 FIX: Check if next span is entirely whitespace-only OR marked as offset_semantic space
                 // If either is true, never insert an additional space - just concatenate directly
@@ -3217,13 +3229,27 @@ impl TextExtractor {
                 }
             }
 
-            if decimal_merge || font_change_merge || should_merge {
+            if decimal_merge || should_merge || cross_font_word_glue {
                 // Extend bounding box to include both spans
                 let new_width = (span.bbox.x + span.bbox.width) - current.bbox.x;
                 let new_height = current.bbox.height.max(span.bbox.height);
 
                 current.bbox.width = new_width;
                 current.bbox.height = new_height;
+
+                // After a cross-font glue, adopt the longer run's font
+                // metadata. The single-letter side was typographic
+                // decoration, not semantic emphasis, so the dominant-run
+                // style should win.
+                if cross_font_word_glue {
+                    let span_chars = span.text.chars().count();
+                    let current_chars_before = current.text.chars().count() - span_chars;
+                    if span_chars > current_chars_before {
+                        current.font_name = span.font_name.clone();
+                        current.font_weight = span.font_weight;
+                        current.is_italic = span.is_italic;
+                    }
+                }
 
                 log::trace!(
                     "Merged span: appended '{}' (gap={:.1}pt, now {} chars)",
@@ -12764,5 +12790,42 @@ mod profile_based_space_tests {
             2,
             "3-digit decimal part should not trigger decimal merge"
         );
+    }
+
+    #[test]
+    fn test_cross_font_word_glue_single_letter_prefix() {
+        // A single-letter span in one font, tight-kerned against a
+        // multi-letter span in another font, is the drop-cap pattern.
+        // These must merge into one word with the longer run's font
+        // metadata — emitting per-letter emphasis runs corrupts proper
+        // nouns.
+        let mut extractor = TextExtractor::new();
+        extractor.merging_config = SpanMergingConfig::default();
+
+        extractor.spans = vec![
+            TextSpan {
+                text: "S".to_string(),
+                bbox: Rect::new(72.0, 700.0, 10.0, 12.0),
+                font_name: "Helvetica-Bold".to_string(),
+                font_weight: FontWeight::Bold,
+                font_size: 12.0,
+                ..TextSpan::default()
+            },
+            TextSpan {
+                text: "ales".to_string(),
+                bbox: Rect::new(82.0, 700.0, 30.0, 12.0),
+                font_name: "Helvetica".to_string(),
+                font_weight: FontWeight::Normal,
+                font_size: 12.0,
+                ..TextSpan::default()
+            },
+        ];
+
+        extractor.merge_adjacent_spans();
+
+        assert_eq!(extractor.spans.len(), 1, "cross_font_word_glue should merge 'S' + 'ales' into 'Sales'");
+        assert_eq!(extractor.spans[0].text, "Sales");
+        // Dominant-font swap: the longer run (regular weight) should win.
+        assert_eq!(extractor.spans[0].font_weight, FontWeight::Normal);
     }
 }

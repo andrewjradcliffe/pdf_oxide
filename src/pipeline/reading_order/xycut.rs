@@ -55,6 +55,13 @@ pub struct XYCutStrategy {
     pub min_valley_width: f32,
 
     /// Enable horizontal partitioning first, fallback to vertical (default: true).
+    ///
+    /// Per PDF Spec ISO 32000-1:2008 §14.8.4 (Logical Structure reading order),
+    /// column detection is the primary purpose of XY-Cut — horizontal-first
+    /// (vertical cut line) splits columns before rows, matching Western
+    /// top-down-left-to-right reading order in multi-column documents.
+    /// Callers with row-dominant layouts can override via
+    /// `with_prefer_horizontal(false)`.
     pub prefer_horizontal: bool,
 }
 
@@ -84,6 +91,12 @@ impl XYCutStrategy {
     /// Create with custom minimum valley width.
     pub fn with_min_valley_width(mut self, width: f32) -> Self {
         self.min_valley_width = width.max(1.0);
+        self
+    }
+
+    /// Enable or disable horizontal partitioning first preference.
+    pub fn with_prefer_horizontal(mut self, prefer: bool) -> Self {
+        self.prefer_horizontal = prefer;
         self
     }
 
@@ -124,24 +137,21 @@ impl XYCutStrategy {
             return vec![self.sort_indices(all_spans, indices)];
         }
 
-        // Try horizontal partitioning (vertical line split) — this detects
-        // columns. Per PDF Spec ISO 32000-1:2008 §14.8.4 (Logical Structure
-        // reading order), column detection is the primary purpose of XY-Cut.
-        if let Some((left, right)) = self.find_horizontal_split_indexed(all_spans, indices) {
-            let mut result = self.partition_indexed(all_spans, &left);
-            result.extend(self.partition_indexed(all_spans, &right));
+        let split_h = |s: &Self, sp: &[TextSpan], idx: &[usize]| s.find_horizontal_split_indexed(sp, idx);
+        let split_v = |s: &Self, sp: &[TextSpan], idx: &[usize]| s.find_vertical_split_indexed(sp, idx);
+
+        let first_split = if self.prefer_horizontal { split_h } else { split_v };
+        let second_split = if self.prefer_horizontal { split_v } else { split_h };
+
+        if let Some((a, b)) = first_split(self, all_spans, indices) {
+            let mut result = self.partition_indexed(all_spans, &a);
+            result.extend(self.partition_indexed(all_spans, &b));
             return result;
         }
 
-        // Try vertical partitioning (horizontal line split). This handles
-        // the "header band above a multi-column body" case: the split
-        // isolates the header row so the body can subsequently be column-
-        // split. Per PDF coordinate convention (origin at bottom-left, Y
-        // grows upward), the first tuple element is the upper-Y (top-of-
-        // page) partition and must be processed first in reading order.
-        if let Some((above, below)) = self.find_vertical_split_indexed(all_spans, indices) {
-            let mut result = self.partition_indexed(all_spans, &above);
-            result.extend(self.partition_indexed(all_spans, &below));
+        if let Some((a, b)) = second_split(self, all_spans, indices) {
+            let mut result = self.partition_indexed(all_spans, &a);
+            result.extend(self.partition_indexed(all_spans, &b));
             return result;
         }
 
@@ -177,37 +187,96 @@ impl XYCutStrategy {
             return true;
         }
 
-        let mut lines: std::collections::BTreeMap<i32, Vec<(f32, f32)>> =
+        // Store both bbox.right and core_right for each span. bbox.right
+        // can be over-estimated by extractors (trailing whitespace,
+        // stretched advance widths) which makes multi-column lines look
+        // like one wide continuous run; core_right (char_count × em) is
+        // a conservative fallback used ONLY when adjacent bbox edges
+        // overlap (a signal of bbox inflation).
+        let mut lines: std::collections::BTreeMap<i32, Vec<(f32, f32, f32)>> =
             std::collections::BTreeMap::new();
         for &i in indices {
             let s = &all_spans[i];
             let y_key = s.bbox.top().round() as i32;
+            let char_count =
+                s.text.chars().filter(|c| !c.is_whitespace()).count().max(1) as f32;
+            let approx_char_width = (s.font_size * 0.45).max(2.5);
+            let core_right = s.bbox.left() + char_count * approx_char_width;
             lines
                 .entry(y_key)
                 .or_default()
-                .push((s.bbox.left(), s.bbox.right()));
+                .push((s.bbox.left(), s.bbox.right(), core_right));
         }
         if lines.len() < 3 {
             return false;
         }
 
-        // Primary check: majority of lines are wide AND densely covered.
-        // This catches clean body text where every line covers most of the
-        // region width with almost no intra-line gaps.
+        // A real column gutter recurs at roughly the SAME X position
+        // across multiple lines. Sparse title-page layouts (Title /
+        // Subtitle / Byline) also have wide inter-word gaps, but their
+        // gap positions are scattered — not a gutter. Collect all gap
+        // positions (mid-gap X), then check whether a consistent cluster
+        // of gap positions appears on ≥30% of lines.
+        //
+        // Gap uses bbox.right, but if adjacent bboxes OVERLAP (classic
+        // signature of extractor-inflated bbox widths), re-check with
+        // conservative core_right estimates so column detection is not
+        // defeated by trailing whitespace inflation.
+        let max_gap = self.min_valley_width;
+        let mut gap_positions: Vec<f32> = Vec::new();
+        for line_spans in lines.values() {
+            let mut sorted = line_spans.clone();
+            sorted.sort_by(|a, b| crate::utils::safe_float_cmp(a.0, b.0));
+            for w in sorted.windows(2) {
+                let bbox_gap = w[1].0 - w[0].1;
+                let (effective_gap, gap_end_left) = if bbox_gap < 0.0 {
+                    (w[1].0 - w[0].2, w[0].2)
+                } else {
+                    (bbox_gap, w[0].1)
+                };
+                if effective_gap >= max_gap {
+                    gap_positions.push((gap_end_left + w[1].0) * 0.5);
+                }
+            }
+        }
+        // Cluster gap positions: count, for each observed gap, how many
+        // other gaps fall within ±20pt. If any cluster contains gaps
+        // from ≥30% of lines, it's a genuine column gutter.
+        if !gap_positions.is_empty() {
+            let cluster_radius = 20.0_f32;
+            // Require ≥3 gap positions (or 20% of lines, whichever is
+            // larger) clustered within ±20pt. 20% accommodates pages
+            // where header/footer/title rows dilute the body-line count
+            // but a real multi-column body still dominates.
+            let min_cluster = (3usize).max(lines.len() / 5);
+            for &pos in &gap_positions {
+                let cluster_size = gap_positions
+                    .iter()
+                    .filter(|&&p| (p - pos).abs() <= cluster_radius)
+                    .count();
+                if cluster_size >= min_cluster {
+                    return false;
+                }
+            }
+        }
+
+        // With no column gutter found on any line, check that the majority
+        // of lines are wide AND densely covered. This catches clean body
+        // text where every line covers most of the region width.
         let width_threshold = region_width * 0.6;
         let mut wide_dense_lines = 0usize;
         for line_spans in lines.values() {
             let mut sorted = line_spans.clone();
             sorted.sort_by(|a, b| crate::utils::safe_float_cmp(a.0, b.0));
             let extent_left = sorted.first().unwrap().0;
-            let extent_right = sorted.iter().map(|(_, r)| *r).fold(f32::MIN, f32::max);
+            let extent_right = sorted.iter().map(|(_, r, _)| *r).fold(f32::MIN, f32::max);
             let extent = extent_right - extent_left;
             if extent < width_threshold {
                 continue;
             }
             let mut covered = 0.0f32;
             let mut last_end = f32::MIN;
-            for &(l, r) in &sorted {
+            for &(l, r, _) in &sorted {
                 let start = l.max(last_end);
                 if r > start {
                     covered += r - start;
@@ -218,27 +287,7 @@ impl XYCutStrategy {
                 wide_dense_lines += 1;
             }
         }
-        if wide_dense_lines * 2 >= lines.len() {
-            return true;
-        }
-
-        // Fallback check: no line has a significant intra-line gap. Catches
-        // sparse-but-aligned single-column layouts like TOCs, dot-leader
-        // entries, and justified text where word gaps dominate. Any real
-        // multi-column layout has an inter-column gutter ≥ `min_valley_width`
-        // on at least some lines.
-        let max_gap = self.min_valley_width;
-        for line_spans in lines.values() {
-            let mut sorted = line_spans.clone();
-            sorted.sort_by(|a, b| crate::utils::safe_float_cmp(a.0, b.0));
-            for w in sorted.windows(2) {
-                let gap = w[1].0 - w[0].1;
-                if gap >= max_gap {
-                    return false;
-                }
-            }
-        }
-        true
+        wide_dense_lines * 2 >= lines.len()
     }
 
     /// Find vertical line (X-axis) split using index-based partitioning.
@@ -261,9 +310,15 @@ impl XYCutStrategy {
 
         let split_x = profile.x_min + (valley_start + valley_end) as f32 / 2.0;
 
+        // Partition by span LEFT EDGE (where the glyphs actually start),
+        // not bbox.right() and not center. Extractor bboxes overreach to
+        // the right (trailing whitespace / stretched advance widths), and
+        // for wide single-column body spans the center can also drift
+        // past the split. Left edge is anchored to the true glyph start
+        // and reliably places each span into its actual column.
         let (left, right): (Vec<usize>, Vec<usize>) = indices
             .iter()
-            .partition(|&&i| all_spans[i].bbox.right() <= split_x);
+            .partition(|&&i| all_spans[i].bbox.left() < split_x);
 
         if left.is_empty() || right.is_empty() {
             return None;
@@ -319,10 +374,11 @@ impl XYCutStrategy {
             return None;
         }
 
-        // Reject lopsided splits (see `find_horizontal_split_indexed`). A
-        // real row split has content on both sides; otherwise we're chasing
-        // a stray page header/footer.
-        let min_side = (indices.len() / 10).max(2);
+        // Row (vertical) splits legitimately produce singleton top
+        // partitions for lone headers/titles, so we accept down to 1
+        // span per side. The column (horizontal) split is stricter since
+        // single-span columns are almost always spurious.
+        let min_side = (indices.len() / 10).max(1);
         if above.len() < min_side || below.len() < min_side {
             return None;
         }
@@ -364,11 +420,26 @@ impl XYCutStrategy {
         }
         let mut density = vec![0.0; width];
 
+        // Text extractors frequently over-estimate span bbox widths
+        // (trailing whitespace, stretched advance widths). That makes a
+        // full-width projection falsely fill the inter-column gutter on
+        // multi-column pages. We project each span's TEXT CORE footprint
+        // anchored to its LEFT edge (where glyphs actually start), with
+        // length proportional to character count. The left edge is
+        // reliable; the right edge is not.
         for &i in indices {
             let span = &all_spans[i];
-            let x_start = (span.bbox.left() - x_min).max(0.0).ceil() as usize;
-            let x_end = (span.bbox.right() - x_min).ceil() as usize;
             let height = span.bbox.bottom() - span.bbox.top();
+            let char_count = span.text.chars().filter(|c| !c.is_whitespace()).count().max(1);
+            // 0.45em per char is a reasonable average across common PDF
+            // fonts (Helvetica/Times/Arial at body size) and narrower
+            // than the 0.5em advance used for monospace.
+            let approx_char_width = (span.font_size * 0.45).max(2.5);
+            let core_width = char_count as f32 * approx_char_width;
+            let core_left = span.bbox.left();
+            let core_right = (core_left + core_width).min(span.bbox.right());
+            let x_start = (core_left - x_min).max(0.0).ceil() as usize;
+            let x_end = (core_right - x_min).ceil() as usize;
 
             for j in x_start..x_end.min(width) {
                 density[j] += height;
@@ -435,6 +506,12 @@ impl XYCutStrategy {
     }
 
     /// Find the widest valley (white space gap) in projection profile.
+    ///
+    /// Only considers INTERIOR valleys — gaps sandwiched between two
+    /// non-empty regions. Leading/trailing empty bands (margin space
+    /// outside the actual content extent) are ignored; they represent
+    /// page margins, not column gutters, and picking them would produce
+    /// meaningless splits.
     fn find_valley(&self, profile: &ProjectionProfile) -> Option<(usize, usize, f32)> {
         if profile.density.is_empty() {
             return None;
@@ -446,6 +523,11 @@ impl XYCutStrategy {
         if peak == 0.0 {
             return None;
         }
+
+        // Find the content extent (first and last non-empty positions).
+        // Valleys outside this extent are leading/trailing margins.
+        let first_nonzero = profile.density.iter().position(|&d| d > 0.0)?;
+        let last_nonzero = profile.density.iter().rposition(|&d| d > 0.0)?;
 
         // Find valleys (regions below threshold)
         let threshold = peak * self.valley_threshold;
@@ -469,9 +551,12 @@ impl XYCutStrategy {
             valleys.push((valley_start, profile.density.len()));
         }
 
-        // Return widest valley
+        // Return the widest INTERIOR valley (strictly between first and
+        // last non-zero positions). Leading/trailing margin valleys are
+        // filtered out.
         valleys
             .into_iter()
+            .filter(|&(start, end)| start > first_nonzero && end <= last_nonzero + 1)
             .map(|(start, end)| (start, end, (end - start) as f32))
             .max_by(|a, b| crate::utils::safe_float_cmp(a.2, b.2))
     }
