@@ -4,15 +4,19 @@ exclude = ["js"]
 
 [package]
 name = "pdf_oxide"
-version = "0.3.30"
+version = "0.3.31"
+# Anchor patterns with a leading slash — Cargo uses gitignore-style globs, so
+# a bare "README.md" matches every README.md recursively (was pulling in 20+
+# subdir READMEs plus js/node_modules/*/README.md into the sdist). Leading /
+# anchors to the package root.
 include = [
-    "src/**/*",
-    "benches/**/*",
-    "Cargo.toml",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-    "README.md",
-    "include/**/*",
+    "/src/**/*",
+    "/benches/**/*",
+    "/Cargo.toml",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/README.md",
+    "/include/**/*",
 ]
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
@@ -56,7 +60,6 @@ smallvec = "1.13"  # Stack-allocated small vectors for content stream operands (
 # Compression/Decompression
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 weezl = "0.1"  # LZW compression
-libflate = "2.1"  # Another inflate implementation for error recovery
 brotli = "8"  # Brotli compression (PDF 2.0, ISO 32000-2:2020)
 
 # Font parsing
@@ -66,6 +69,7 @@ encoding_rs = "0.8"  # Shift-JIS, EUC-JP, and other CJK encodings for predefined
 
 # Image processing
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "tiff"] }
+jpeg-decoder = "0.3"  # Direct decoder access for CMYK JPEGs (Adobe inversion handling)
 base64 = "0.22"  # For embedding images as data URIs
 tiff = "0.11"  # TIFF support including CCITT decompression
 fax = "0.2"   # CCITT Group 3/4 decompression for scanned PDFs (more lenient with malformed EOFB)
@@ -89,7 +93,7 @@ signature = { version = "2.2", optional = true }      # Signature traits
 sha1 = { version = "0.10", optional = true }          # SHA-1 for legacy signatures
 
 # Parallel extraction
-rayon = { version = "1.10", optional = true }
+rayon = { version = "1.12", optional = true }
 
 # Math and algorithms
 ndarray = { version = "0.17", optional = true, features = ["std"] }
@@ -144,7 +148,7 @@ qrcode = { version = "0.14", optional = true }
 barcoders = { version = "2.0", optional = true, features = ["image"] }
 
 # Office document conversion (optional)
-calamine = { version = "0.33", optional = true }
+calamine = { version = "0.34", optional = true }
 zip = { version = "8.5", optional = true, default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

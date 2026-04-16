@@ -2,6 +2,73 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.31] - 2026-04-15
+
+### Text extraction correctness
+
+- **`extract_text(n)` returned page 0's content for every `n` on PDFs that share one Form XObject across all pages (#346, B1).** Certain producers (notably ExpertPdf) emit one big Form XObject containing every page's text and give each page's content stream a different CTM translation to clip into its slice. Two cache/filter bugs stacked: (1) `xobject_spans_cache` keyed spans by `ObjectRef` only and returned CTM-transformed page-0 coordinates to every subsequent page; (2) even once the cache was CTM-gated, the extractor had no awareness of the content-stream `W n` clipping operator, so every page emitted the whole stack at distinct but out-of-bounds Y coordinates. Fix: cache only when the caller CTM is identity, and post-filter extracted spans by the page's MediaBox (with a 2pt bleed tolerance). Added `Matrix::is_identity()`. Regression test at `tests/test_b1_shared_form_xobject_per_page_ctm.rs`. Largest single-fixture improvement in this release — `nougat_005.pdf` TF1 **0.254 → 0.901**.
+
+- **Running-artifact detector stripped the cover-page title when it happened to repeat as the per-page running header (B3).** Reports like "Fiscal Year 2010 Appropriations Act" or "University of Oklahoma 2009" appear at the top of every page *and* are the document title on page 1. The detector classified them as chrome and removed them from page 1 too. Fix: track first-seen page per signature (across all pages, not just body-content pages), skip the artifact marking on that first occurrence. Covers the edge case where the cover page is all-chrome and would otherwise be skipped by the body-content gate. Regression test at `tests/test_b3_first_occurrence_of_running_header_kept.rs`.
+
+- **Multi-column reading order via XY-cut (B4).** `extract_text` used a row-aware Y-band sort that interleaved left/right columns on newspaper / academic layouts: `LeftCol-row1 RightCol-row1 LeftCol-row2 …`. Added `is_multi_column_page` heuristic (body-span X-center histogram with vertical-overlap confirmation, a 15% chrome-band exclusion so header banners don't trip the detector, 25%-per-side minimum column mass) that routes detected multi-column pages through the existing `XYCutStrategy`. Single-column pages stay on the cheap row-aware path. Regression test synthesises a 2×20 interleaved grid at `tests/test_b4_two_column_reading_order.rs`.
+
+- **Stroke+fill labels no longer produce doubled words (B7).** Map/poster PDFs render every label twice — once stroked for the outline, once filled — and both passes landed as distinct `TextSpan`s at essentially the same CTM. The downstream merge step concatenated them, producing `"EverestEverest"`, `"CentralCentral"`. New `dedup_stroke_fill_overlap` runs before existing positional dedup: bucket by lowercased text, drop any later span whose bbox overlaps an earlier same-text span by ≥ 70% IoU. Conservative thresholds (≥2-char minimum, using `.chars().count()` not `.len()` so non-ASCII glyphs are handled correctly). Regression test at `tests/test_b7_stroke_fill_dedup.rs`.
+
+- **Soft-hyphen line-break rejoin (B8a).** Typographic hyphenation — `"scruti-\nneer"` for `"scrutineer"`, `"disinfec-\ntion"` for `"disinfection"` — previously preserved the hyphen and newline. Added `dehyphenate_line_breaks` to the plain-text cleanup pipeline: rewrites `<lowercase>-[ \t]*\n[ \t]*<lowercase>` → concatenation. Conservative on both sides (requires ASCII lowercase before and after) so compound hyphens (`"state-of-the-art"`), proper-noun fragments (`"co-\nWorker"`), and bullet markers stay intact.
+
+- **TrueType cmap format 0 parser (B9).** Microsoft Office Word/Excel subset fonts (Calibri, Times New Roman) sometimes ship only a format-0 (legacy 1-byte Mac Roman) cmap. Previously these fonts bailed with "Unsupported cmap format: 0" and the font had no glyph→Unicode mapping, which cascaded into text extraction losing content from that font. Added `parse_cmap_format0` — reads the 6-byte header + 256 glyph IDs, maps byte codes 0x00–0x7F as ASCII pass-through and 0x80–0xFF through the full Mac Roman → Unicode table (so byte 0x8A correctly decodes to `ä`). Truncated glyph arrays surface as parse errors rather than silent zero-glyph output.
+
+### Verification infrastructure
+
+- **`tools/benchmark-harness/` — TF1/SF1 extraction quality measurement crate (#320).** New workspace member that computes **TF1** (bag-of-words F1 on lowercase alphanumeric tokens) and **SF1** (block-weighted structural F1 with LIS ordering penalty) against ground-truth markdown. Methodology mirrors Kreuzberg's harness so numbers are directly comparable. Includes engine adapters for `pdf_oxide` (in-process), `pdftotext` (poppler subprocess), and `pdfium` (gated behind `--features pdfium`); a consensus-baseline mode for corpora without manual ground truth; and a `diff` subcommand with regression gates (default: fail on mean TF1 drop > 0.5pp or per-fixture drop > 5pp). `scripts/fetch-fixtures.sh` clones Kreuzberg's Apache-2.0 fixture set without vendoring PDFs into our repo. Makefile targets: `make benchmark-fetch`, `make benchmark-run`, `make benchmark-compare`. 18 unit tests.
+
+  **Cumulative impact on the 78-unique-fixture Kreuzberg corpus vs v0.3.30 baseline:**
+  - TF1 mean: 0.919 → **0.930** (+1.1pp)
+  - TF1 p10 (hard tail): 0.776 → **0.849** (+7.3pp — tied with pdftotext)
+  - SF1 mean: 0.337 → 0.355 (+1.8pp) — pdf_oxide leads pdftotext by +10.8pp SF1 on this corpus
+  - Runtime: −42%
+  - Zero per-fixture TF1 regressions > 0.5pp
+
+  Four follow-up work items filed with precise reproducers: #363 (ToUnicode CID-miss on specific MS Office subset fonts), #364 (FlateDecode stream offset bug on MS Reporting Services PDFs), #365 (intra-word TJ space calibration), #366 (CI wiring for the harness), #367 (docling-parse adapter), #368 (markdown adapter for the pdf_oxide engine).
+
+### Earlier bug fixes included in this release
+
+- **Rendering: `Page index N not found by scanning` on PDFs whose xref mis-flags page objects as free** — when a producer emits a corrupted xref table with `f` entries pointing at real objects (common in several large regulatory PDFs in the wild), `load_object` previously resolved every such object to `Null` per §7.3.10. If the page objects were uncompressed the page tree traversal would bottom out in nulls; if they were packed into `/Type /ObjStm` the `get_page_by_scanning` fallback never reached the content at all. Two recovery paths now trigger before the `Null` fallback: (1) if the file body contains an `N G obj` marker for the supposedly-free id, load it from the scanned offset — the same mechanism already used for objects missing from the xref entirely; (2) if not found in the body, perform a one-time raw-pattern scan for every `/Type /ObjStm` in the file, parse each, and cache all contained objects (overwriting the earlier `Null` entries). The `get_page_by_scanning` fallback now unions `xref.all_object_numbers()` with the newly-cached ObjStm ids so pages whose xref slot says `f` but whose content lives inside an object stream are visible to the scanner; its heuristic second pass (page-shaped dicts without `/Type`) now also runs as a complement rather than only when pass 1 finds zero pages. Also unifies the `id <= 10` code path with the general path — previously low-numbered free-flagged objects hit a broken "fall through" branch that still ended up Null.
+- **Rendering: `Invalid object number in header: j` on PDFs whose xref offsets are off by a handful of bytes** — the same SEBI-style PDF also carries a second corruption shape: `in_use=true` xref entries whose byte offsets point ~3 bytes BEFORE the real `N G obj` header (into the previous object's `endobj` tail). The existing `find_object_header_backwards` fallback only triggered when no `obj` keyword was found at all, not when the keyword parsed but the preceding tokens were junk like `j`. `load_uncompressed_object_impl` now catches the parse-as-number failure, re-queries `scan_for_object` for the same id, and if the scan recorded a different offset retries from there. With both fixes live, the report's 253-page PDF goes from 0 → **253 pages renderable** (was 0 before the free-flag recovery, 200 with just that fix, 253 with the combined offset recovery). Regression tests in `tests/test_xref_free_flag_corruption.rs` cover both corruption shapes plus the clean-baseline and genuinely-free negative cases.
+
+### BREAKING — Go module install flow
+
+- **Native Rust libraries are no longer committed to `go/lib/`** — after landing the 63% staticlib shrink (below), the committed payload would still have been ~130 MB per release, accumulating indefinitely in git history. v0.3.31 instead publishes per-platform `pdf_oxide-go-ffi-<platform>.tar.gz` as GitHub Release assets and ships a small Go installer at `go/cmd/install`. Consumers run it once per machine:
+  ```
+  go get github.com/yfedoseev/pdf_oxide/go
+  go run github.com/yfedoseev/pdf_oxide/go/cmd/install@latest
+  # Installer prints the CGO_CFLAGS / CGO_LDFLAGS to export
+  ```
+  The installer downloads the matching asset into `~/.pdf_oxide/v<version>/`, SHA-256 verifies it against the signed `.sha256` published alongside, and either prints the env vars to export or (with `--write-flags=<dir>`) generates a `cgo_flags.go` next to the user's code. Monorepo / source-tree builds use `-tags pdf_oxide_dev` which points CGo at `target/release/libpdf_oxide.a` directly — no installer needed.
+
+  **`@latest` just works** — the installer reads its own module version from `runtime/debug.ReadBuildInfo()`, so every tagged release auto-matches its FFI assets without a release-time sed step. `go run .../cmd/install@latest` always resolves to the matching `.tar.gz`.
+
+  **Why:** shipping ~130 MB of binary in git per release was bloating clone time and accumulating to GBs over dozens of releases. This is the approach Kreuzberg (https://github.com/kreuzberg-dev/kreuzberg/blob/main/packages/go/v4/cmd/install/main.go) and similar Rust-in-Go projects use. Repo size per release bump drops to ~0 KB; clone stays fast forever.
+
+  **Migration:** consumers upgrading from v0.3.30 must run the install command once and export the printed `CGO_*` env vars (or add them to their shell profile / CI env). No code changes to the Go API. `go get` without the install step will fail at link time with `undefined reference to pdf_document_open ...` — the installer fixes this.
+
+- **Go release pipeline hardening** — three ordering + integrity fixes landed alongside the install-flow switch:
+  - **SHA-256 gate end-to-end.** `package-go-ffi` emits `pdf_oxide-go-ffi-<platform>.tar.gz.sha256` next to each tarball (attached to the GitHub Release). The Go installer downloads both and aborts with a checksum mismatch if they don't match; `--skip-checksum` bypasses for offline/air-gapped installs. The same `.sha256` is verified by `verify-go-install` in CI before the release is even published.
+  - **verify-go-install is now a publish gate.** `create-release` depends on `verify-go-install` — that job extracts the freshly-built tarball, matches the sha256, then builds a `FromMarkdown → Save → Open → PageCount` consumer against a local `replace` directive. A broken `.a`, a missing symbol, or a stale `cgo_dev.go` blocks the release instead of leaking through.
+  - **`go/v<version>` tag is pushed last, not first.** A new `tag-go-module` job runs *after* `create-release` has uploaded the FFI tarballs. Previously the tag was pushed during packaging, creating a window where `go install @latest` could resolve a tag whose FFI assets 404'd. Tag creation is gated on `!contains(version, '-')` so prerelease `-rc.1` tags never reach sum.golang.org.
+
+### Release Infrastructure (artifact size reductions)
+
+- **Shrink Rust static libs 62.8% before packaging** — Rust-produced staticlibs carry 35 MB of `.llvmbc` (LLVM bitcode for cross-crate LTO) + 4 MB of DWARF per platform, none of which CGo's linker or node-gyp ever uses. New `scripts/shrink-staticlib.sh` strips both via `objcopy --remove-section=.llvmbc --remove-section=.llvmcmd --strip-debug` (Linux / Windows-GNU) or `strip -S` (macOS) inside the `build-native-libs` job. Per-platform `libpdf_oxide.a` drops from ~71 MB to ~26 MB. All 85 Go-consumed FFI symbols verified intact post-strip.
+- **Strip the npm `.node` addon** — `node-gyp rebuild` left the addon unstripped (17 MB, `with debug_info, not stripped`). Added post-build `strip --strip-unneeded` (Linux) / `strip -x` (macOS) in the `build-nodejs` job. Combined with the upstream staticlib shrink, the Linux `.node` is expected to drop from 17 MB to ~7 MB.
+- **Drop sourcemaps from the npm tarball** — `js/tsconfig.json` sets `declarationMap: false` + `sourceMap: false` for the published build. File count falls from 211 → 107 (removes 104 `.js.map` / `.d.ts.map` files). `.d.ts.map` was never useful to consumers; `.js.map` is moot without TS sources, which we don't ship.
+- **Fix crate sdist leak (pulled in 47 unrelated files)** — Cargo's `include` uses gitignore-style globs, so the bare `"README.md"` entry was matching every README.md recursively, including 27 `js/node_modules/*/README.md` dependency READMEs and 20 subdirectory READMEs. Anchored all patterns with a leading `/` — sdist file count 308 → 264.
+- **Tighten NuGet symbol package** — `EmbedAllSources` dropped from `true` to `false` in `csharp/PdfOxide/PdfOxide.csproj`. SourceLink + the embedded PDB already serve sources on demand from the git SHA, so embedding every source file into the `.snupkg` was pure bloat. Added defensive `<None Remove="..\..\target\**\*.pdb" />` to prevent native PDBs from landing in `runtimes/` (nuget.org's snupkg validator rejects native PDBs).
+
+### Thanks
+
+Issues reported or features requested by: [@Goldziher](https://github.com/Goldziher) (#320 benchmark harness), [@ddxtanx](https://github.com/ddxtanx) (#346 sort-order panic, #354 memory leak on page 12), [@frederikhors](https://github.com/frederikhors) (#325 rendering regression), [@Charltsing](https://github.com/Charltsing) (#344 CMYK JPEGs), [@FireMasterK](https://github.com/FireMasterK) (#345 page-scan failures), [@Jeevaanandh](https://github.com/Jeevaanandh) (#353 yanked libflate dep).
+
 ## [0.3.27] - 2026-04-12
 
 ### Language Bindings

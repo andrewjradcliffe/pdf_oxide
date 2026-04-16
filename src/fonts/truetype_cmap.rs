@@ -9,6 +9,36 @@ use byteorder::{BigEndian, ReadBytesExt};
 use std::collections::HashMap;
 use std::io::Cursor;
 
+/// Mac Roman (platform 1, encoding 0) high-half → Unicode mapping.
+///
+/// Bytes 0x00..0x7F are identical to ASCII and are handled by the caller.
+/// This table covers 0x80..0xFF per Apple's Mac Roman → Unicode reference.
+#[rustfmt::skip]
+const MAC_ROMAN_HIGH: [char; 128] = [
+    'Ä', 'Å', 'Ç', 'É', 'Ñ', 'Ö', 'Ü', 'á',
+    'à', 'â', 'ä', 'ã', 'å', 'ç', 'é', 'è',
+    'ê', 'ë', 'í', 'ì', 'î', 'ï', 'ñ', 'ó',
+    'ò', 'ô', 'ö', 'õ', 'ú', 'ù', 'û', 'ü',
+    '†', '°', '¢', '£', '§', '•', '¶', 'ß',
+    '®', '©', '™', '´', '¨', '≠', 'Æ', 'Ø',
+    '∞', '±', '≤', '≥', '¥', 'µ', '∂', '∑',
+    '∏', 'π', '∫', 'ª', 'º', 'Ω', 'æ', 'ø',
+    '¿', '¡', '¬', '√', 'ƒ', '≈', '∆', '«',
+    '»', '…', '\u{00A0}', 'À', 'Ã', 'Õ', 'Œ', 'œ',
+    '–', '—', '"', '"', '\'', '\'', '÷', '◊',
+    'ÿ', 'Ÿ', '⁄', '€', '‹', '›', 'ﬁ', 'ﬂ',
+    '‡', '·', '‚', '„', '‰', 'Â', 'Ê', 'Á',
+    'Ë', 'È', 'Í', 'Î', 'Ï', 'Ì', 'Ó', 'Ô',
+    '\u{F8FF}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜',
+    '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ',
+];
+
+#[inline]
+fn mac_roman_to_unicode(byte: u8) -> char {
+    debug_assert!(byte >= 0x80);
+    MAC_ROMAN_HIGH[(byte - 0x80) as usize]
+}
+
 /// Represents a TrueType cmap table extracted from an embedded font
 #[derive(Debug, Clone)]
 pub struct TrueTypeCMap {
@@ -187,11 +217,62 @@ impl TrueTypeCMap {
             .map_err(|e| format!("Failed to read cmap format: {}", e))?;
 
         match format {
+            0 => Self::parse_cmap_format0(cursor),
             4 => Self::parse_cmap_format4(cursor),
             6 => Self::parse_cmap_format6(cursor),
             12 => Self::parse_cmap_format12(cursor),
             _ => Err(format!("Unsupported cmap format: {}", format)),
         }
+    }
+
+    /// Parse cmap format 0 (legacy 1-byte indexed, Mac Roman era).
+    ///
+    /// Structure per Apple TrueType reference (subtable length 262):
+    ///   u16 format       (already read by caller — 2 bytes)
+    ///   u16 length       (262: 2+2+2+256)
+    ///   u16 language
+    ///   u8  glyphIdArray[256]   — glyphId for each byte code 0..255
+    ///
+    /// Microsoft Office subset fonts (Calibri, Times New Roman subsets in
+    /// Word/Excel exports) still ship with a format-0 cmap for the `(1,0)`
+    /// Macintosh encoding alongside their `(3,1)` Unicode cmap. When the
+    /// Unicode cmap is missing or malformed we fall back to this one; the
+    /// byte code acts as the Mac Roman character code.
+    ///
+    /// Benchmark canary: ~8 Kreuzberg MS Office fixtures previously logged
+    /// "Unsupported cmap format: 0" warnings and lost font glyph mapping
+    /// as a consequence (B9).
+    fn parse_cmap_format0(cursor: &mut Cursor<&[u8]>) -> Result<HashMap<u16, char>, String> {
+        let _length = cursor
+            .read_u16::<BigEndian>()
+            .map_err(|e| format!("Failed to read format 0 length: {}", e))?;
+        let _language = cursor
+            .read_u16::<BigEndian>()
+            .map_err(|e| format!("Failed to read format 0 language: {}", e))?;
+
+        let mut glyph_ids = [0u8; 256];
+        std::io::Read::read_exact(cursor, &mut glyph_ids)
+            .map_err(|e| format!("Failed to read format 0 glyphIdArray: {}", e))?;
+
+        let mut gid_to_unicode = HashMap::new();
+        for (byte, &gid) in glyph_ids.iter().enumerate() {
+            if gid == 0 {
+                continue;
+            }
+            // ASCII pass-through for 0x00..0x7F (Mac Roman lower half is
+            // identical to ASCII). Above 0x7F we route through the Mac
+            // Roman → Unicode table so byte 0x8A (a-umlaut in Mac Roman)
+            // maps to U+00E4 instead of U+008A.
+            let ch = if byte < 0x80 {
+                char::from_u32(byte as u32)
+            } else {
+                Some(mac_roman_to_unicode(byte as u8))
+            };
+            if let Some(ch) = ch {
+                gid_to_unicode.insert(gid as u16, ch);
+            }
+        }
+        Ok(gid_to_unicode)
     }
 
     /// Parse cmap format 4 (BMP - supports characters U+0000 to U+FFFF)
@@ -471,6 +552,45 @@ mod tests {
         data
     }
 
+    /// Build a minimal TrueType font with a cmap format 0 table.
+    /// `glyph_ids` is the 256-entry byte → glyph id array.
+    fn build_truetype_with_cmap_format0(glyph_ids: [u8; 256]) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // sfnt header
+        data.write_u32::<BigEndian>(0x00010000).unwrap();
+        data.write_u16::<BigEndian>(1).unwrap(); // numTables
+        data.write_u16::<BigEndian>(16).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap();
+
+        // table directory
+        let cmap_offset: u32 = 12 + 16;
+        data.write_u32::<BigEndian>(0x636D6170).unwrap(); // 'cmap'
+        data.write_u32::<BigEndian>(0).unwrap(); // checksum
+        data.write_u32::<BigEndian>(cmap_offset).unwrap();
+        data.write_u32::<BigEndian>(0).unwrap(); // length
+
+        // cmap table header
+        data.write_u16::<BigEndian>(0).unwrap(); // version
+        data.write_u16::<BigEndian>(1).unwrap(); // numSubtables = 1
+
+        // Use platform (1, 0) — Macintosh / Roman — so the parser routes
+        // directly through the format-0 path.
+        let subtable_offset: u32 = 4 + 8;
+        data.write_u16::<BigEndian>(1).unwrap(); // platformID = Macintosh
+        data.write_u16::<BigEndian>(0).unwrap(); // encodingID = Roman
+        data.write_u32::<BigEndian>(subtable_offset).unwrap();
+
+        // ---- cmap format 0 subtable ----
+        data.write_u16::<BigEndian>(0).unwrap(); // format
+        data.write_u16::<BigEndian>(262).unwrap(); // length (fixed for format 0)
+        data.write_u16::<BigEndian>(0).unwrap(); // language
+        data.extend_from_slice(&glyph_ids);
+
+        data
+    }
+
     /// Build a minimal TrueType font with a cmap format 6 table.
     fn build_truetype_with_cmap_format6(first_code: u16, gids: &[u16]) -> Vec<u8> {
         let mut data = Vec::new();
@@ -701,6 +821,71 @@ mod tests {
         let cmap_one = TrueTypeCMap::from_font_data(&data_one).unwrap();
         assert_eq!(cmap_one.len(), 1);
         assert!(!cmap_one.is_empty());
+    }
+
+    #[test]
+    fn test_cmap_format0_byte_indexed() {
+        // Build a format-0 cmap where byte code 0x41 ('A') maps to gid 10,
+        // 0x42 ('B') to gid 11, and everything else is 0 (.notdef).
+        let mut gids = [0u8; 256];
+        gids[0x41] = 10;
+        gids[0x42] = 11;
+        gids[0x7A] = 50;
+        let data = build_truetype_with_cmap_format0(gids);
+        let cmap = TrueTypeCMap::from_font_data(&data).expect("format 0 parse");
+        assert_eq!(cmap.get_unicode(10), Some('A'));
+        assert_eq!(cmap.get_unicode(11), Some('B'));
+        assert_eq!(cmap.get_unicode(50), Some('z'));
+        // Absent glyphs map to nothing.
+        assert_eq!(cmap.get_unicode(99), None);
+    }
+
+    #[test]
+    fn test_cmap_format0_mac_roman_high_half() {
+        // Byte 0x8A in Mac Roman is 'ä' (U+00E4), not raw 0x8A.
+        let mut gids = [0u8; 256];
+        gids[0x41] = 10; // 'A' — ASCII pass-through
+        gids[0x8A] = 20; // 'ä' via Mac Roman table
+        gids[0xA5] = 30; // '•' bullet via Mac Roman
+        let data = build_truetype_with_cmap_format0(gids);
+        let cmap = TrueTypeCMap::from_font_data(&data).expect("format 0 parse");
+        assert_eq!(cmap.get_unicode(10), Some('A'));
+        assert_eq!(
+            cmap.get_unicode(20),
+            Some('ä'),
+            "Mac Roman 0x8A must map to U+00E4 (a-umlaut), not raw 0x8A"
+        );
+        assert_eq!(cmap.get_unicode(30), Some('•'));
+    }
+
+    #[test]
+    fn test_cmap_format0_rejects_truncated() {
+        // 256-byte array but declared length wrong → truncated.
+        let mut data = Vec::new();
+        data.write_u32::<BigEndian>(0x00010000).unwrap();
+        data.write_u16::<BigEndian>(1).unwrap();
+        data.write_u16::<BigEndian>(16).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap();
+        let cmap_offset: u32 = 12 + 16;
+        data.write_u32::<BigEndian>(0x636D6170).unwrap();
+        data.write_u32::<BigEndian>(0).unwrap();
+        data.write_u32::<BigEndian>(cmap_offset).unwrap();
+        data.write_u32::<BigEndian>(0).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap();
+        data.write_u16::<BigEndian>(1).unwrap();
+        data.write_u16::<BigEndian>(1).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap();
+        data.write_u32::<BigEndian>(4 + 8).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap(); // format
+                                                 // Declare the correct length (262) but only append 8 bytes of
+                                                 // glyphIdArray instead of 256 — parser should detect the
+                                                 // truncation via read_exact.
+        data.write_u16::<BigEndian>(262).unwrap();
+        data.write_u16::<BigEndian>(0).unwrap();
+        data.extend_from_slice(&[0u8; 8]);
+        let result = TrueTypeCMap::from_font_data(&data);
+        assert!(result.is_err());
     }
 
     #[test]

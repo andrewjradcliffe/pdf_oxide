@@ -124,10 +124,29 @@ impl MarkdownOutputConverter {
     /// Check if a span consists of a single bullet character.
     ///
     /// Common bullet characters used in PDF documents:
-    /// ► • ▪ ▸ ‣ ◦ ● ■ ◆ ○ □
+    /// ► • ▪ ▸ ‣ ◦ ● ■ ◆ ○ □ ❍ ❖ ✓ ✔ ➢ ➤ 
     fn is_bullet_span(text: &str) -> bool {
         let t = text.trim();
-        matches!(t, "►" | "•" | "▪" | "▸" | "‣" | "◦" | "●" | "■" | "◆" | "○" | "□")
+        matches!(
+            t,
+            "►" | "•"
+                | "▪"
+                | "▸"
+                | "‣"
+                | "◦"
+                | "●"
+                | "■"
+                | "◆"
+                | "○"
+                | "□"
+                | "❍"
+                | "❖"
+                | "✓"
+                | "✔"
+                | "➢"
+                | "➤"
+                | "\x7f"
+        )
     }
 
     /// Check if text starts with a bullet character (for inline bullets).
@@ -144,6 +163,69 @@ impl MarkdownOutputConverter {
             || t.starts_with('◆')
             || t.starts_with('○')
             || t.starts_with('□')
+            || t.starts_with('❍')
+            || t.starts_with('❖')
+            || t.starts_with('✓')
+            || t.starts_with('✔')
+            || t.starts_with('➢')
+            || t.starts_with('➤')
+            || t.starts_with('\x7f')
+    }
+
+    /// Validate that a string looks like a heading (not a paragraph or noise).
+    ///
+    /// Content-based guards only — no language/locale-specific keyword lists.
+    fn is_valid_heading_text(text: &str) -> bool {
+        let trimmed = text.trim();
+        let text_len = trimmed.chars().count();
+        // Headings must be non-trivial but also not full paragraphs.
+        // 200 chars is ~35 words, which safely accommodates long wrapped titles
+        // while excluding paragraph-length runs that share a larger font.
+        if !(2..=200).contains(&text_len) {
+            return false;
+        }
+        // Sentence-length guards: a heading rarely exceeds 20 words and
+        // almost never contains a full stop followed by more text (that's
+        // a paragraph, even if it happens to be set in a larger font).
+        let word_count = trimmed.split_whitespace().count();
+        if word_count > 20 {
+            return false;
+        }
+        // Exclude runs with mid-sentence punctuation ("foo. Bar baz") —
+        // real headings don't contain sentence boundaries.
+        let bytes = trimmed.as_bytes();
+        for i in 0..bytes.len().saturating_sub(2) {
+            if bytes[i] == b'.' && bytes[i + 1] == b' ' {
+                let next = bytes[i + 2];
+                if next.is_ascii_alphabetic() {
+                    return false;
+                }
+            }
+        }
+
+        // Reject if dominated by digits/punctuation (KPI numbers, page numbers,
+        // "$100", "23.5K"). Require a minimum alphabetic ratio that scales:
+        // very short strings need at least 2 letters; longer strings need
+        // >=30% alphabetic characters.
+        let alpha_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+        if text_len <= 8 {
+            if alpha_count < 2 {
+                return false;
+            }
+        } else if alpha_count * 10 < text_len * 3 {
+            return false;
+        }
+
+        // Reject KPI-style values ("4.2 days", "+15% QoQ", "$1.2M Total"):
+        // strings that LEAD with a number/sign/currency symbol are almost
+        // always data values, not headings, even in a larger font. A real
+        // heading leads with a word.
+        let first = trimmed.chars().next().unwrap_or(' ');
+        if first.is_ascii_digit() || matches!(first, '+' | '-' | '$' | '€' | '£' | '¥' | '%') {
+            return false;
+        }
+
+        true
     }
 
     /// Strip the leading bullet character from text, returning the rest.
@@ -159,40 +241,15 @@ impl MarkdownOutputConverter {
         }
     }
 
-    /// Detect if span should be a heading based on font size.
-    ///
-    /// Uses absolute font sizes (only for clear heading cases):
-    /// - H1: 24pt and above
-    /// - H2: 18-23pt
-    /// - H3: 16-17pt
-    ///
-    /// Note: Falls back to ratio-based detection for more nuanced cases.
-    /// Headings must also be short (< 200 chars) to avoid promoting body paragraphs.
-    fn heading_level_absolute(&self, span: &OrderedTextSpan) -> Option<u8> {
-        let size = span.span.font_size;
-        let text_len = span.span.text.trim().len();
-        // Headings must be short but non-trivial
-        if !(2..=200).contains(&text_len) {
+    /// Detect heading level from the span's font size relative to the
+    /// document's body size (caller-provided, typically the mode of
+    /// observed sizes). Ratios: H1 >=1.8x, H2 >=1.4x, H3 >=1.2x, or
+    /// H3 for bold at >=1.1x.
+    fn heading_level_ratio(&self, span: &OrderedTextSpan, base_font_size: f32) -> Option<u8> {
+        if !Self::is_valid_heading_text(span.span.text.trim()) {
             return None;
         }
-        if size >= 24.0 {
-            Some(1)
-        } else if size >= 18.0 {
-            Some(2)
-        } else if size >= 16.0 {
-            Some(3)
-        } else {
-            None
-        }
-    }
-
-    /// Detect heading level based on font size ratio to base size.
-    /// Requires a meaningful size difference to avoid promoting slightly-larger text.
-    /// Bold text gets a lower threshold since bold+larger is a strong heading signal.
-    fn heading_level_ratio(&self, span: &OrderedTextSpan, base_font_size: f32) -> Option<u8> {
-        let text_len = span.span.text.trim().len();
-        // Headings must be short but non-trivial
-        if !(2..=200).contains(&text_len) {
+        if base_font_size <= 0.0 {
             return None;
         }
         let size_ratio = span.span.font_size / base_font_size;
@@ -200,13 +257,13 @@ impl MarkdownOutputConverter {
             span.span.font_weight,
             FontWeight::Bold | FontWeight::Black | FontWeight::ExtraBold | FontWeight::SemiBold
         );
-        if size_ratio >= 2.0 {
+        if size_ratio >= 1.8 {
             Some(1)
-        } else if size_ratio >= 1.5 {
+        } else if size_ratio >= 1.4 {
             Some(2)
-        } else if size_ratio >= 1.3 {
+        } else if size_ratio >= 1.2 {
             Some(3)
-        } else if is_bold && size_ratio >= 1.15 {
+        } else if is_bold && size_ratio >= 1.1 {
             // Bold text with even slight size increase is a heading signal
             Some(3)
         } else {
@@ -220,7 +277,7 @@ impl MarkdownOutputConverter {
     /// cells. Without this, markdown parsers silently drop trailing cells from
     /// short rows, which causes data loss (e.g. "CERTIFICATE NO.: 403852" missing
     /// from converted output).
-    fn render_table_markdown(table: &ExtractedTable) -> String {
+    fn render_table_markdown(&self, table: &ExtractedTable, config: &TextPipelineConfig) -> String {
         if table.rows.is_empty() {
             return String::new();
         }
@@ -254,10 +311,87 @@ impl MarkdownOutputConverter {
             let mut cols_written: usize = 0;
             for cell in &row.cells {
                 output.push(' ');
-                // Escape pipe characters in cell text
-                let text = cell.text.replace('|', "\\|");
-                let text = text.replace('\n', " ");
-                output.push_str(text.trim());
+
+                // Render bold/italic from span metadata when available;
+                // fall back to plain text for cells without span info.
+                let cell_text = if !cell.spans.is_empty() {
+                    let mut cell_md = String::new();
+                    let mut active_bold = false;
+                    let mut active_italic = false;
+
+                    // Order per-span emit: close-old-markers → inter-span
+                    // space → open-new-markers → text. This keeps whitespace
+                    // OUTSIDE emphasis delimiters, which CommonMark requires
+                    // (`** text**` and `**text **` are both rejected as
+                    // literal asterisks by strict renderers).
+                    for (i, span) in cell.spans.iter().enumerate() {
+                        let is_bold = self.is_bold_raw(span, config);
+                        let is_italic = span.is_italic;
+                        let formatting_changed =
+                            is_bold != active_bold || is_italic != active_italic;
+
+                        if formatting_changed {
+                            if active_italic {
+                                cell_md.push('*');
+                            }
+                            if active_bold {
+                                cell_md.push_str("**");
+                            }
+                        }
+
+                        if i > 0 {
+                            let prev = &cell.spans[i - 1];
+                            let has_gap = super::has_horizontal_gap(prev, span);
+                            let already_has_space =
+                                cell_md.ends_with(' ') || span.text.starts_with(' ');
+                            if has_gap && !already_has_space {
+                                cell_md.push(' ');
+                            }
+                        }
+
+                        if formatting_changed {
+                            if is_bold {
+                                cell_md.push_str("**");
+                            }
+                            if is_italic {
+                                cell_md.push('*');
+                            }
+                            active_bold = is_bold;
+                            active_italic = is_italic;
+                        }
+
+                        let mut text = span.text.replace('|', "\\|").replace('\n', " ");
+                        let just_opened = is_bold || is_italic;
+                        if just_opened && (cell_md.ends_with("**") || cell_md.ends_with('*')) {
+                            while text.starts_with(' ') {
+                                text.remove(0);
+                            }
+                        }
+                        cell_md.push_str(&text);
+                    }
+
+                    // Final close: CommonMark forbids whitespace adjacent
+                    // to closing markers; strip it before the markers and
+                    // re-append after.
+                    if active_italic || active_bold {
+                        let content_end = cell_md.trim_end().len();
+                        let trailing = cell_md[content_end..].to_string();
+                        cell_md.truncate(content_end);
+                        if active_italic {
+                            cell_md.push('*');
+                        }
+                        if active_bold {
+                            cell_md.push_str("**");
+                        }
+                        cell_md.push_str(&trailing);
+                    }
+
+                    cell_md
+                } else {
+                    cell.text.replace('|', "\\|").replace('\n', " ")
+                };
+
+                output.push_str(cell_text.trim());
                 output.push(' ');
                 // Handle colspan by adding extra | separators
                 let span = cell.colspan.max(1) as usize;
@@ -288,6 +422,22 @@ impl MarkdownOutputConverter {
         output
     }
 
+    /// Resolve bold emphasis for a raw TextSpan honoring config.
+    fn is_bold_raw(&self, span: &crate::layout::TextSpan, config: &TextPipelineConfig) -> bool {
+        use crate::pipeline::config::BoldMarkerBehavior;
+        match span.font_weight {
+            FontWeight::Bold | FontWeight::Black | FontWeight::ExtraBold | FontWeight::SemiBold => {
+                match config.output.bold_marker_behavior {
+                    BoldMarkerBehavior::Aggressive => true,
+                    BoldMarkerBehavior::Conservative => {
+                        span.text.chars().any(|c| !c.is_whitespace())
+                    },
+                }
+            },
+            _ => false,
+        }
+    }
+
     /// Core rendering logic shared between convert() and convert_with_tables().
     fn render_spans(
         &self,
@@ -303,25 +453,28 @@ impl MarkdownOutputConverter {
         let mut sorted: Vec<_> = spans.iter().collect();
         sorted.sort_by_key(|s| s.reading_order);
 
-        // Calculate base font size for heading detection.
-        // Exclude spans < 9pt (bullet characters like ►, subscripts, footnotes)
-        // from the median to prevent their small sizes from skewing heading
-        // detection — e.g. many 8.8pt ► spans pulling the median down to 8.8pt,
-        // causing all 11pt body text to look like headings (ratio 1.25).
-        // If all spans are < 9pt (page dominated by small text), falls back to
-        // 12pt default. The .max(8.0) is a safety floor for edge cases.
+        // Body-font size for the heading-ratio reference. Span-count
+        // mode bucketed to 0.5pt, with smaller-bucket tiebreak so body
+        // text wins over headings when counts are close. Capped at 12pt
+        // so that heading-only documents still produce sensible ratios.
         let base_font_size = if config.output.detect_headings {
-            let mut sizes_sorted: Vec<f32> = sorted
-                .iter()
-                .map(|s| s.span.font_size)
-                .filter(|&s| s >= 9.0)
-                .collect();
-            sizes_sorted.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
-            sizes_sorted
-                .get(sizes_sorted.len() / 2)
-                .copied()
-                .unwrap_or(12.0)
-                .max(8.0)
+            // Exclude sub-9pt spans (bullet glyphs, subscripts, footnotes)
+            // that would skew the mode downward.
+            let mut size_counts: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            for s in sorted.iter() {
+                let sz = s.span.font_size;
+                if sz < 9.0 {
+                    continue;
+                }
+                *size_counts.entry((sz * 2.0).round() as u32).or_insert(0) += 1;
+            }
+            let mode = size_counts
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+                .map(|(bucket, _)| bucket as f32 / 2.0)
+                .unwrap_or(12.0);
+            mode.min(12.0)
         } else {
             12.0
         };
@@ -329,7 +482,10 @@ impl MarkdownOutputConverter {
         // Track which tables have been rendered
         let mut tables_rendered = vec![false; tables.len()];
         // Pre-render table markdown so we can check for orphaned spans.
-        let table_mds: Vec<String> = tables.iter().map(Self::render_table_markdown).collect();
+        let table_mds: Vec<String> = tables
+            .iter()
+            .map(|t| self.render_table_markdown(t, config))
+            .collect();
         // Collect spans skipped because they fall inside a table region.
         let mut table_skipped_spans: Vec<Vec<&OrderedTextSpan>> = vec![Vec::new(); tables.len()];
 
@@ -343,6 +499,7 @@ impl MarkdownOutputConverter {
         // of **ACME** **GLOBAL** **LTD.**.
         let mut active_bold = false;
         let mut active_italic = false;
+        let mut current_heading_level: Option<u8> = None;
 
         /// Close any open bold/italic markers on `line`.
         ///
@@ -368,7 +525,54 @@ impl MarkdownOutputConverter {
             line.push_str(&trailing_ws);
         }
 
+        // Strip markdown emphasis markers (**bold**, *italic*) from a line.
+        // Used when emitting heading lines, where the `#` prefix already
+        // provides emphasis and nested markers (e.g. `# **Title**`) are
+        // redundant and can confuse strict CommonMark renderers.
+        fn strip_emphasis(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            let chars: Vec<char> = s.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '*' {
+                    // Skip one or two asterisks
+                    i += 1;
+                    if i < chars.len() && chars[i] == '*' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+            out
+        }
+
         for span in sorted.iter() {
+            // Skip artifacts (pagination, headers, footers)
+            if span.span.artifact_type.is_some() {
+                continue;
+            }
+
+            // Skip "noise" spans: isolated single-character fragments that
+            // are purely punctuation/symbol (e.g. a bare "|" or "—" on its
+            // own baseline from a decorative PDF separator). These add no
+            // semantic value but pollute output as lone-line paragraphs.
+            // Bullet characters are excluded from this filter since they
+            // are meaningful list markers handled downstream.
+            {
+                let t = span.span.text.trim();
+                let char_count = t.chars().count();
+                if char_count > 0
+                    && char_count <= 2
+                    && !t.chars().any(|c| c.is_alphanumeric())
+                    && !Self::is_bullet_span(t)
+                    && !Self::starts_with_bullet(t)
+                {
+                    continue;
+                }
+            }
+
             // Check if this span belongs to a table region
             if !tables.is_empty() {
                 if let Some(table_idx) = super::span_in_table(span, tables) {
@@ -394,6 +598,12 @@ impl MarkdownOutputConverter {
                 }
             }
 
+            let span_heading_level = if config.output.detect_headings {
+                self.heading_level_ratio(span, base_font_size)
+            } else {
+                None
+            };
+
             // Check for paragraph break or line break
             let same_line = prev_span
                 .map(|prev| (span.span.bbox.y - prev.span.bbox.y).abs() < span.span.font_size * 0.5)
@@ -407,13 +617,30 @@ impl MarkdownOutputConverter {
                     _ => false,
                 };
 
-                if group_changed || self.is_paragraph_break(span, prev) {
+                let heading_changed = current_heading_level != span_heading_level;
+
+                // A reading-order group change only forces a paragraph break
+                // when the visual line also changes — this keeps horizontally
+                // split elements (e.g. multi-span footer lines) together.
+                let group_flush = group_changed && !same_line;
+
+                if group_flush || self.is_paragraph_break(span, prev) || heading_changed {
                     close_formatting(&mut current_line, &mut active_bold, &mut active_italic);
                     if !current_line.is_empty() {
-                        result.push_str(current_line.trim());
-                        result.push_str("\n\n");
+                        if let Some(level) = current_heading_level {
+                            let prefix = "#".repeat(level as usize);
+                            result.push_str(&format!(
+                                "{} {}\n\n",
+                                prefix,
+                                strip_emphasis(current_line.trim())
+                            ));
+                        } else {
+                            result.push_str(current_line.trim());
+                            result.push_str("\n\n");
+                        }
                         current_line.clear();
                     }
+                    current_heading_level = span_heading_level;
                 } else if !same_line {
                     // Different visual line but within paragraph spacing.
                     // Check if a bullet item starts here — if so, start a new line.
@@ -423,10 +650,20 @@ impl MarkdownOutputConverter {
                         // Bullet on new line → flush current line and start list item
                         close_formatting(&mut current_line, &mut active_bold, &mut active_italic);
                         if !current_line.is_empty() {
-                            result.push_str(current_line.trim());
-                            result.push('\n');
+                            if let Some(level) = current_heading_level {
+                                let prefix = "#".repeat(level as usize);
+                                result.push_str(&format!(
+                                    "{} {}\n\n",
+                                    prefix,
+                                    strip_emphasis(current_line.trim())
+                                ));
+                            } else {
+                                result.push_str(current_line.trim());
+                                result.push('\n');
+                            }
                             current_line.clear();
                         }
+                        current_heading_level = span_heading_level;
                     } else {
                         // Different visual line within the same paragraph — close
                         // open formatting before the line-join space so that
@@ -442,82 +679,49 @@ impl MarkdownOutputConverter {
                         }
                     }
                 }
+            } else {
+                current_heading_level = span_heading_level;
             }
 
-            // Handle bullet character spans: replace with markdown list marker
+            // Standalone bullet-glyph span → markdown list marker.
             if Self::is_bullet_span(&span.span.text) {
-                // Standalone bullet char span (e.g., "►" as its own span)
-                // Replace with "- " prefix; text follows in next span(s)
-                if same_line && !current_line.is_empty() && !current_line.ends_with("- ") {
-                    // Bullet on same line as other content — preserve as-is
-                    current_line.push_str(&span.span.text);
-                } else if !current_line.ends_with("- ") {
+                if !current_line.ends_with("- ") {
+                    if !current_line.is_empty() && !current_line.ends_with(' ') {
+                        current_line.push(' ');
+                    }
                     current_line.push_str("- ");
                 }
                 prev_span = Some(span);
                 continue;
             }
+
+            let mut text_str = span.span.text.clone();
+
+            // Normalize known mis-extracted bullet glyphs (DEL from Zapf
+            // Dingbats mappings, ❍ from ligature remaps) to U+2022 so the
+            // bullet-span logic above can recognize them uniformly.
+            if text_str.contains('\x7f') || text_str.contains('❍') {
+                text_str = text_str.replace(['\x7f', '❍'], "•");
+            }
+
+            // Pipe characters are only markdown-syntactic inside table
+            // cells; in paragraph flow they are just text. Pipe escaping
+            // for tables is handled in render_table_markdown. Leaving `|`
+            // alone in flow avoids showing `&#124;` in user-visible prose.
+
+            let mut text = text_str.as_str();
 
             // Handle inline bullets (text starts with bullet char)
-            if Self::starts_with_bullet(&span.span.text) && (!same_line || prev_span.is_none()) {
-                let stripped = Self::strip_bullet(&span.span.text);
+            if Self::starts_with_bullet(text) {
+                let stripped = Self::strip_bullet(text);
                 if !current_line.ends_with("- ") {
+                    if !current_line.is_empty() && !current_line.ends_with(' ') {
+                        current_line.push(' ');
+                    }
                     current_line.push_str("- ");
                 }
-                // Process the stripped text through normal formatting below
-                // by re-assigning text variable
-                let normalized_bullet;
-                let mut text = stripped;
-                if !config.output.preserve_layout {
-                    normalized_bullet = self.normalize_whitespace(text);
-                    text = &normalized_bullet;
-                }
-                let linkified = self.linkify(text);
-                let is_bold = self.is_bold(span, config);
-                let is_italic = self.is_italic(span);
-                if is_bold != active_bold || is_italic != active_italic {
-                    close_formatting(&mut current_line, &mut active_bold, &mut active_italic);
-                    if is_bold {
-                        current_line.push_str("**");
-                        active_bold = true;
-                    }
-                    if is_italic {
-                        current_line.push('*');
-                        active_italic = true;
-                    }
-                }
-                current_line.push_str(&linkified);
-                prev_span = Some(span);
-                continue;
+                text = stripped;
             }
-
-            // Check for heading (take best level from absolute and ratio methods)
-            if config.output.detect_headings {
-                let level = match (
-                    self.heading_level_absolute(span),
-                    self.heading_level_ratio(span, base_font_size),
-                ) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
-
-                if let Some(level) = level {
-                    close_formatting(&mut current_line, &mut active_bold, &mut active_italic);
-                    if !current_line.is_empty() {
-                        result.push_str(current_line.trim());
-                        result.push_str("\n\n");
-                        current_line.clear();
-                    }
-
-                    let prefix = "#".repeat(level as usize);
-                    result.push_str(&format!("{} {}\n\n", prefix, span.span.text.trim()));
-                    prev_span = None;
-                    continue;
-                }
-            }
-
-            // Format text with bold/italic and apply linkification
-            let mut text = span.span.text.as_str();
 
             let normalized;
             if !config.output.preserve_layout {
@@ -627,8 +831,17 @@ impl MarkdownOutputConverter {
         for (i, table) in tables.iter().enumerate() {
             if !tables_rendered[i] && !table.is_empty() {
                 if !current_line.is_empty() {
-                    result.push_str(current_line.trim());
-                    result.push_str("\n\n");
+                    if let Some(level) = current_heading_level {
+                        let prefix = "#".repeat(level as usize);
+                        result.push_str(&format!(
+                            "{} {}\n\n",
+                            prefix,
+                            strip_emphasis(current_line.trim())
+                        ));
+                    } else {
+                        result.push_str(current_line.trim());
+                        result.push_str("\n\n");
+                    }
                     current_line.clear();
                 }
                 result.push_str(&table_mds[i]);
@@ -638,8 +851,13 @@ impl MarkdownOutputConverter {
 
         // Flush remaining content
         if !current_line.is_empty() {
-            result.push_str(current_line.trim());
-            result.push('\n');
+            if let Some(level) = current_heading_level {
+                let prefix = "#".repeat(level as usize);
+                result.push_str(&format!("{} {}\n", prefix, strip_emphasis(current_line.trim())));
+            } else {
+                result.push_str(current_line.trim());
+                result.push('\n');
+            }
         }
 
         // Final whitespace normalization
@@ -857,7 +1075,8 @@ mod tests {
     #[test]
     fn test_render_table_markdown_empty() {
         let table = ExtractedTable::new();
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
         assert_eq!(result, "");
     }
 
@@ -869,7 +1088,8 @@ mod tests {
         row.add_cell(TableCell::new("B".to_string(), false));
         table.add_row(row);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
         assert!(result.contains("| A |"));
         assert!(result.contains("| B |"));
         // First row treated as header by default in markdown
@@ -889,7 +1109,8 @@ mod tests {
         data.add_cell(TableCell::new("Right".to_string(), false));
         table.add_row(data);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
         // Colspan cell should produce extra | separators
         assert!(result.contains("| Wide |"));
         assert!(result.contains("---|---|"));
@@ -902,8 +1123,9 @@ mod tests {
         row.add_cell(TableCell::new("A|B".to_string(), false));
         table.add_row(row);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
-        assert!(result.contains("A\\|B"), "Pipes should be escaped: {}", result);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
+        assert!(result.contains("A\\|B"), "Pipes should be backslash-escaped: {}", result);
     }
 
     #[test]
@@ -913,7 +1135,8 @@ mod tests {
         row.add_cell(TableCell::new("Line1\nLine2".to_string(), false));
         table.add_row(row);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
         assert!(!result.contains("Line1\nLine2"), "Newlines in cells should be replaced");
         assert!(result.contains("Line1 Line2"));
     }
@@ -925,7 +1148,8 @@ mod tests {
         row.add_cell(TableCell::new("  padded  ".to_string(), false));
         table.add_row(row);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
         assert!(result.contains("| padded |"));
     }
 
@@ -946,7 +1170,8 @@ mod tests {
         d1.add_cell(TableCell::new("D1".to_string(), false));
         table.add_row(d1);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
         // Separator should appear after last header row (row_idx == 1)
         let lines: Vec<&str> = result.lines().collect();
         assert_eq!(lines.len(), 4); // H1, H2, separator, D1
@@ -1419,7 +1644,8 @@ mod tests {
         data.add_cell(TableCell::new("4351966".to_string(), false));
         table.add_row(data);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
 
         // All cells must be present
         assert!(
@@ -1458,7 +1684,8 @@ mod tests {
         data.add_cell(TableCell::new("2".to_string(), false));
         table.add_row(data);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
 
         // Count pipes in header vs data row — they must match
         let lines: Vec<&str> = result.lines().collect();
@@ -1492,7 +1719,8 @@ mod tests {
         data.add_cell(TableCell::new("3".to_string(), false));
         table.add_row(data);
 
-        let result = MarkdownOutputConverter::render_table_markdown(&table);
+        let result = MarkdownOutputConverter::new()
+            .render_table_markdown(&table, &crate::pipeline::TextPipelineConfig::default());
 
         let lines: Vec<&str> = result.lines().collect();
         assert!(lines.len() >= 3, "Must have header, separator, and data row: {}", result);

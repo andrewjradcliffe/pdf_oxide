@@ -6,7 +6,6 @@
 use crate::decoders::StreamDecoder;
 use crate::error::{Error, Result};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
-use libflate::zlib::Decoder as LibflateDecoder;
 use std::io::Read;
 
 /// Default cap for [`FlateDecoder`]: 256 MB per stream.
@@ -151,41 +150,7 @@ impl StreamDecoder for FlateDecoder {
                             }
                         }
 
-                        // Strategy 4: Try libflate (different implementation)
-                        log::info!("Trying libflate crate");
-                        output.clear();
-                        match LibflateDecoder::new(input) {
-                            Ok(mut libflate_decoder) => {
-                                let mut limited =
-                                    (&mut libflate_decoder).take(self.max_decompressed_bytes);
-                                match limited.read_to_end(&mut output) {
-                                    Ok(_) if !output.is_empty() => {
-                                        check_limit(&output, self.max_decompressed_bytes)?;
-                                        log::info!(
-                                            "Libflate recovery succeeded: {} bytes",
-                                            output.len()
-                                        );
-                                        return Ok(output);
-                                    },
-                                    Err(_) if !output.is_empty() => {
-                                        check_limit(&output, self.max_decompressed_bytes)?;
-                                        log::warn!(
-                                            "Libflate partial recovery: {} bytes",
-                                            output.len()
-                                        );
-                                        return Ok(output);
-                                    },
-                                    _ => {
-                                        log::info!("Libflate read failed");
-                                    },
-                                }
-                            },
-                            Err(e) => {
-                                log::info!("Libflate init failed: {}", e);
-                            },
-                        }
-
-                        // Strategy 5: Try fixing corrupt zlib header byte
+                        // Strategy 4: Try fixing corrupt zlib header byte
                         // If first byte has invalid compression method, replace with 0x78 (standard deflate)
                         if input.len() >= 2 {
                             let first_byte = input[0];
@@ -228,7 +193,7 @@ impl StreamDecoder for FlateDecoder {
                             }
                         }
 
-                        // Strategy 6: Brute-force scan for valid deflate data
+                        // Strategy 5: Brute-force scan for valid deflate data
                         // Try starting deflate decompression from offsets 0-20
                         // BUT validate the output contains valid PDF operators
                         log::info!("Trying brute-force scan for valid deflate data");

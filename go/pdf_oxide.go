@@ -1,25 +1,33 @@
 package pdfoxide
 
-// Static linking: each ${SRCDIR}/lib/<os_arch>/libpdf_oxide.a is the Rust
-// staticlib output (Cargo.toml crate-type). Linking the archive directly
-// (rather than via -L + -lpdf_oxide) produces a self-contained Go binary
-// with no runtime LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH lookup. See #334.
+// Linking configuration — v0.3.31 onwards.
 //
-// The trailing system libraries are what rustc's stdlib + crypto deps need
-// when you static-link a Rust library. Regenerate the exact list per-target
-// with `cargo rustc --release --lib --target <triple> -- --print native-static-libs`
-// if link failures appear after a dependency bump.
+// This file declares only the C function prototypes (the CGo preamble below).
+// `#cgo LDFLAGS` directives live in SEPARATE files so we can pick the right
+// link path without committing native libraries to the module:
 //
-// Windows ARM64 is still dynamic pending a gnullvm-based staticlib build;
-// users building Windows ARM64 Go binaries must ship pdf_oxide.dll alongside.
+//   cgo_dev.go     — built under `//go:build pdf_oxide_dev`. Points at the
+//                    Cargo workspace target/ dir. Used inside the monorepo
+//                    after `cargo build --release --lib`.
+//   cgo_flags.go   — OPTIONAL, generated locally by `cmd/install` for users
+//                    who want a committed-per-machine file. Not shipped.
+//   (no file)      — consumer exports CGO_CFLAGS / CGO_LDFLAGS after running
+//                    `go run github.com/yfedoseev/pdf_oxide/go/cmd/install`.
+//                    The installer prints the exact values to export.
+//
+// Background: static-linking the rustc-produced `libpdf_oxide.a` was adding
+// ~310 MB to git history per release (6 platforms × ~50 MB). Shipping the
+// archives via GitHub Releases and downloading on demand removes that bloat
+// without changing the final binary's runtime characteristics (still a
+// self-contained Go binary — no `LD_LIBRARY_PATH` needed).
+//
+// Regenerate the system-library list per target via:
+//   cargo rustc --release --lib --target <triple> -- --print native-static-libs
+// The exact list is baked into cmd/install/main.go.
+//
+// Windows ARM64: still dynamic — must ship pdf_oxide.dll alongside the exe.
 
 /*
-#cgo linux,amd64 LDFLAGS: ${SRCDIR}/lib/linux_amd64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc
-#cgo linux,arm64 LDFLAGS: ${SRCDIR}/lib/linux_arm64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc
-#cgo darwin,amd64 LDFLAGS: ${SRCDIR}/lib/darwin_amd64/libpdf_oxide.a -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv
-#cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libpdf_oxide.a -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv
-#cgo windows,amd64 LDFLAGS: ${SRCDIR}/lib/windows_amd64/libpdf_oxide.a -lws2_32 -luserenv -lbcrypt -ladvapi32 -lcrypt32 -lsynchronization -lntdll -lkernel32 -lntoskrnl -lole32 -lshell32
-#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/lib/windows_arm64 -lpdf_oxide
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>

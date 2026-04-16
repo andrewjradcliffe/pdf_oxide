@@ -49,6 +49,10 @@ pub struct TableCell {
     /// Text content of the cell
     pub text: String,
 
+    /// Original text spans that make up this cell's content, with
+    /// font/style metadata preserved for format-aware rendering.
+    pub spans: Vec<crate::layout::TextSpan>,
+
     /// Number of columns this cell spans (default 1)
     pub colspan: u32,
 
@@ -272,6 +276,7 @@ impl TableCell {
     pub fn new(text: String, is_header: bool) -> Self {
         Self {
             text,
+            spans: Vec::new(),
             colspan: 1,
             rowspan: 1,
             mcids: Vec::new(),

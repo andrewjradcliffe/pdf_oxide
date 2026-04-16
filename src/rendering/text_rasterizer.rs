@@ -43,6 +43,52 @@ impl<'a> OutlineBuilder for SkiaOutlineBuilder<'a> {
     }
 }
 
+/// Returns true if the font's only usable cmap subtable is a byte-indexed
+/// (single-byte input) table — typically Macintosh Roman format 0 on
+/// producer-stripped TrueType subsets.
+fn has_byte_indexed_cmap(font_data: &[u8]) -> bool {
+    let face = match ttf_parser::Face::parse(font_data, 0) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let cmap = match face.tables().cmap {
+        Some(c) => c,
+        None => return false,
+    };
+    let mut saw_byte_indexed = false;
+    let mut saw_unicode = false;
+    for sub in cmap.subtables {
+        use ttf_parser::PlatformId;
+        match sub.platform_id {
+            PlatformId::Unicode => saw_unicode = true,
+            PlatformId::Windows if sub.encoding_id == 1 || sub.encoding_id == 10 => {
+                saw_unicode = true
+            },
+            PlatformId::Macintosh if sub.encoding_id == 0 => saw_byte_indexed = true,
+            _ => {},
+        }
+    }
+    saw_byte_indexed && !saw_unicode
+}
+
+/// Resolve a single PDF content byte to a GID by consulting the font's
+/// own cmap subtables. Prefers a byte-indexed (Macintosh Roman) subtable
+/// when present; falls back to ttf-parser's default Unicode resolution
+/// for ASCII-range bytes if no byte-indexed subtable exists.
+fn cmap_byte_to_gid(face: &ttf_parser::Face, byte: u8) -> Option<u16> {
+    if let Some(cmap) = face.tables().cmap {
+        for sub in cmap.subtables {
+            use ttf_parser::PlatformId;
+            if matches!(sub.platform_id, PlatformId::Macintosh) && sub.encoding_id == 0 {
+                if let Some(gid) = sub.glyph_index(byte as u32) {
+                    return Some(gid.0);
+                }
+            }
+        }
+    }
+    face.glyph_index(byte as char).map(|g| g.0)
+}
+
 /// Process-wide cache for the system font database.
 ///
 /// `fontdb::Database::load_system_fonts()` walks every font directory on
@@ -139,6 +185,36 @@ impl TextRasterizer {
         let pdf_font_name = gs.font_name.as_deref().unwrap_or("Helvetica");
         let font_data_and_index: Option<(Vec<u8>, u32, bool)> = if let Some(ref info) = font_info {
             if let Some(ref embedded) = info.embedded_font_data {
+                // Simple (non-Type0) TrueType subsets whose sole cmap subtable
+                // is a byte-indexed table must be rendered by feeding the raw
+                // PDF content bytes to the embedded cmap directly — the PDF
+                // byte is the cmap input under the font's declared encoding
+                // (ISO 32000-1 §9.6.6.4). Unicode shaping against these fonts
+                // is unreliable: even if a space or punctuation happens to
+                // share a codepoint with a cmap key, shaping for letters
+                // resolves to .notdef and the system-font fallback picks up
+                // unrelated glyphs. Bypass the Unicode shaping path entirely
+                // for this subtype so the byte→GID route is taken for every
+                // `Tj` / `TJ` call, not just the ones whose decoded Unicode
+                // happens to miss the cmap.
+                if info.subtype != "Type0" && has_byte_indexed_cmap(embedded) {
+                    log::debug!(
+                        "Using embedded font '{}' with byte-indexed cmap (simple TrueType subset)",
+                        info.base_font
+                    );
+                    return self.render_cid_direct(
+                        pixmap,
+                        text,
+                        info,
+                        embedded,
+                        0,
+                        &paint,
+                        base_transform,
+                        gs,
+                        clip_mask,
+                    );
+                }
+
                 // Validate embedded font: check if rustybuzz can find real glyphs (not .notdef)
                 // CID subset fonts often lack standard Unicode cmap tables, so shaping
                 // produces gid=0 for every character.
@@ -896,9 +972,14 @@ impl TextRasterizer {
             // Map character code to GID based on font type:
             // - CIDFontType2: CIDToGIDMap maps CID → GID
             // - CFF simple font: cff_gid_map maps byte → GID
+            // - Simple TrueType: consult the embedded font's cmap directly
+            //   (the PDF content byte is the cmap input under the font's
+            //   declared encoding; ISO 32000-1 §9.6.6.4).
             // - Default: identity mapping
             let gid = if let Some(cff_map) = &font_info.cff_gid_map {
                 *cff_map.get(&(char_code as u8)).unwrap_or(&0)
+            } else if font_info.subtype != "Type0" && font_info.cid_to_gid_map.is_none() {
+                cmap_byte_to_gid(&ttf_face, char_code as u8).unwrap_or(0)
             } else {
                 match &font_info.cid_to_gid_map {
                     Some(crate::fonts::CIDToGIDMap::Identity) => char_code,

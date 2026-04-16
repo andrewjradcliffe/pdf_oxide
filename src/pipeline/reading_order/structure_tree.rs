@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::layout::TextSpan;
 use crate::pipeline::{OrderedTextSpan, ReadingOrderInfo};
 
-use super::{GeometricStrategy, ReadingOrderContext, ReadingOrderStrategy};
+use super::{ReadingOrderContext, ReadingOrderStrategy, XYCutStrategy};
 
 /// Structure tree-based reading order strategy.
 ///
@@ -16,20 +16,90 @@ use super::{GeometricStrategy, ReadingOrderContext, ReadingOrderStrategy};
 /// the logical reading order of marked content.
 ///
 /// For spans without MCIDs or when no structure tree is available, it falls
-/// back to the GeometricStrategy (column-aware geometric analysis).
+/// back to the XYCutStrategy (recursive spatial partitioning).
 pub struct StructureTreeStrategy {
-    /// Fallback strategy for spans without MCIDs.
-    /// Uses GeometricStrategy for better multi-column document handling.
-    fallback: GeometricStrategy,
+    /// Fallback for spans without MCIDs and for MCID orderings that
+    /// fail the column-respecting sanity check.
+    fallback: XYCutStrategy,
 }
 
 impl StructureTreeStrategy {
-    /// Create a new structure tree strategy.
+    /// Construct a new strategy with a default XY-cut fallback.
     pub fn new() -> Self {
         Self {
-            fallback: GeometricStrategy::new(),
+            fallback: XYCutStrategy::new(),
         }
     }
+}
+
+/// Detect whether applying `mcid_order` to `spans` would produce a
+/// horizontal zigzag pattern — a reliable signal that MCIDs were
+/// assigned in content-stream order rather than visual reading order
+/// on a multi-column page.
+///
+/// Heuristic:
+/// 1. Project span X-centers onto a 1-D histogram to detect 2+ columns
+///    (requires a gap wider than the column width estimate).
+/// 2. Walk the MCID-ordered sequence of spans and count how many times
+///    it crosses between different column clusters.
+/// 3. If crossings exceed `2 * (num_columns - 1)` the order is zigzagging
+///    (a column-respecting order crosses columns only at bottom-of-one /
+///    top-of-next transitions).
+fn mcid_order_zigzags_columns(spans: &[TextSpan], mcid_order: &[u32]) -> bool {
+    // Build ordered list of (span_index, x_center) in MCID order
+    let mcid_to_idx: std::collections::HashMap<u32, usize> = spans
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.mcid.map(|m| (m, i)))
+        .collect();
+    let ordered_x: Vec<f32> = mcid_order
+        .iter()
+        .filter_map(|m| mcid_to_idx.get(m))
+        .map(|&i| spans[i].bbox.x + spans[i].bbox.width * 0.5)
+        .collect();
+    if ordered_x.len() < 10 {
+        return false;
+    }
+
+    // 1-D k-means-lite: detect if there are 2+ clusters of X positions
+    // separated by a meaningful gap.
+    let mut xs_sorted: Vec<f32> = ordered_x.clone();
+    xs_sorted.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
+    let x_min = xs_sorted[0];
+    let x_max = xs_sorted[xs_sorted.len() - 1];
+    let x_extent = x_max - x_min;
+    if x_extent < 50.0 {
+        return false; // single column
+    }
+
+    // Find the largest gap in sorted X positions
+    let mut largest_gap = 0.0_f32;
+    let mut largest_gap_at = x_min;
+    for w in xs_sorted.windows(2) {
+        let gap = w[1] - w[0];
+        if gap > largest_gap {
+            largest_gap = gap;
+            largest_gap_at = (w[0] + w[1]) * 0.5;
+        }
+    }
+    // The gap must be a substantial fraction of the page width to be
+    // considered a column gutter (not just inter-word whitespace).
+    if largest_gap < x_extent * 0.1 || largest_gap < 30.0 {
+        return false;
+    }
+
+    // Classify each span as left-column (0) or right-column (1).
+    let columns: Vec<u8> = ordered_x
+        .iter()
+        .map(|&x| if x < largest_gap_at { 0 } else { 1 })
+        .collect();
+
+    // Count transitions between columns in the MCID-ordered sequence.
+    let crossings = columns.windows(2).filter(|w| w[0] != w[1]).count();
+    // For proper column reading order: left-column finished, then a
+    // SINGLE crossing to right-column. More than 3 crossings means
+    // the order is interleaving columns rather than respecting them.
+    crossings > 3
 }
 
 impl Default for StructureTreeStrategy {
@@ -57,6 +127,16 @@ impl ReadingOrderStrategy for StructureTreeStrategy {
             Some(order) if !order.is_empty() => order,
             _ => return self.fallback.apply(spans, context),
         };
+
+        // Trust-check: if the MCID ordering would zigzag horizontally
+        // across a clear two-column layout, the structure tree is
+        // untrustworthy for reading order (common in PDFs where the
+        // authoring tool assigned MCIDs in content-stream order without
+        // respecting column visual order). Fall back to geometric.
+        if mcid_order_zigzags_columns(&spans, mcid_order) {
+            log::debug!("MCID order zigzags across columns, falling back to geometric ordering");
+            return self.fallback.apply(spans, context);
+        }
 
         // Create MCID -> reading order mapping
         let mcid_to_order: std::collections::HashMap<u32, usize> = mcid_order
@@ -216,7 +296,8 @@ mod tests {
             make_span("Right Bottom", 200.0, 50.0, None),
         ];
 
-        let strategy = StructureTreeStrategy::new();
+        let mut strategy = StructureTreeStrategy::new();
+        strategy.fallback = XYCutStrategy::new().with_prefer_horizontal(true);
         let context = ReadingOrderContext::new(); // No MCID order
         let ordered = strategy.apply(spans, &context).unwrap();
 

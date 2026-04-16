@@ -174,8 +174,8 @@ impl PlainTextConverter {
                 // PDF coords) and verify rows match within tolerance.
                 let mut prev_ys: Vec<f32> = prev_spans.iter().map(|s| s.span.bbox.y).collect();
                 let mut curr_ys: Vec<f32> = curr_spans.iter().map(|s| s.span.bbox.y).collect();
-                prev_ys.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-                curr_ys.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                prev_ys.sort_by(|a, b| crate::utils::safe_float_cmp(*b, *a));
+                curr_ys.sort_by(|a, b| crate::utils::safe_float_cmp(*b, *a));
 
                 let font_size = prev_spans.first().map(|s| s.span.font_size).unwrap_or(12.0);
                 let y_tolerance = font_size * 1.5;
@@ -321,7 +321,7 @@ impl PlainTextConverter {
         }
 
         // Sort clusters top-to-bottom (highest Y first in PDF coords).
-        clusters.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        clusters.sort_by(|a, b| crate::utils::safe_float_cmp(b.0, a.0));
 
         // Within each cluster, sort spans by X-position (left to right).
         for cluster in &mut clusters {
@@ -606,7 +606,7 @@ impl PlainTextConverter {
             // up after higher-Y items, preserving top-to-bottom reading order).
             insertions.sort_by(|a, b| {
                 b.0.cmp(&a.0)
-                    .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| crate::utils::safe_float_cmp(a.1, b.1))
             });
             for (byte_pos, _y, text) in insertions {
                 // Determine the separator to use before the orphan text.
